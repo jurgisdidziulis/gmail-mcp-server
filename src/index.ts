@@ -331,6 +331,88 @@ function createMcpServer(): McpServer {
     }
   );
 
+  // ---- create_draft ----
+  server.tool(
+    "create_draft",
+    "Create a draft email in the specified Gmail account's Drafts folder. The draft will be visible in Gmail and email clients like Spark.",
+    {
+      account: z
+        .string()
+        .describe("Email address of the Gmail account to create the draft in"),
+      to: z.string().describe("Recipient email address"),
+      subject: z.string().describe("Email subject line"),
+      body: z.string().describe("Email body text"),
+      thread_id: z
+        .string()
+        .optional()
+        .describe(
+          "Optional Gmail thread ID to attach this draft to an existing conversation"
+        ),
+    },
+    async ({ account, to, subject, body, thread_id }) => {
+      const gmail = await getGmailServiceForAccount(account);
+      const result = await gmail.createDraft({
+        to,
+        subject,
+        body,
+        threadId: thread_id,
+      });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              account,
+              ...result,
+              message: `Draft created successfully in ${account}.`,
+            }),
+          },
+        ],
+      };
+    }
+  );
+
+  // ---- send_email ----
+  server.tool(
+    "send_email",
+    "Send an email from the specified Gmail account. Use thread_id to send as a reply within an existing conversation.",
+    {
+      account: z
+        .string()
+        .describe("Email address of the Gmail account to send from"),
+      to: z.string().describe("Recipient email address"),
+      subject: z.string().describe("Email subject line"),
+      body: z.string().describe("Email body text"),
+      thread_id: z
+        .string()
+        .optional()
+        .describe(
+          "Optional Gmail thread ID to send this as a reply in an existing conversation"
+        ),
+    },
+    async ({ account, to, subject, body, thread_id }) => {
+      const gmail = await getGmailServiceForAccount(account);
+      const result = await gmail.sendEmail({
+        to,
+        subject,
+        body,
+        threadId: thread_id,
+      });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              account,
+              ...result,
+              message: `Email sent successfully from ${account}.`,
+            }),
+          },
+        ],
+      };
+    }
+  );
+
   return server;
 }
 

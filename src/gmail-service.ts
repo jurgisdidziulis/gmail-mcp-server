@@ -314,6 +314,80 @@ export class GmailService {
   }
 
   // -----------------------------------------------------------------------
+  // create_draft — save a draft in the Drafts folder
+  // -----------------------------------------------------------------------
+
+  async createDraft(options: {
+    to: string;
+    subject: string;
+    body: string;
+    threadId?: string;
+  }): Promise<{ draftId: string; threadId?: string }> {
+    const raw = Buffer.from(
+      [
+        `To: ${options.to}`,
+        `Subject: ${options.subject}`,
+        `Content-Type: text/plain; charset="UTF-8"`,
+        "",
+        options.body,
+      ].join("\r\n")
+    ).toString("base64url");
+
+    const requestBody: gmail_v1.Schema$Draft = {
+      message: { raw },
+    };
+    if (options.threadId) {
+      requestBody.message!.threadId = options.threadId;
+    }
+
+    const res = await this.gmail.users.drafts.create({
+      userId: "me",
+      requestBody,
+    });
+
+    return {
+      draftId: res.data.id!,
+      threadId: res.data.message?.threadId ?? undefined,
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // send_email — send a new email or reply in a thread
+  // -----------------------------------------------------------------------
+
+  async sendEmail(options: {
+    to: string;
+    subject: string;
+    body: string;
+    threadId?: string;
+  }): Promise<{ messageId: string; threadId?: string }> {
+    const raw = Buffer.from(
+      [
+        `To: ${options.to}`,
+        `Subject: ${options.subject}`,
+        `Content-Type: text/plain; charset="UTF-8"`,
+        "",
+        options.body,
+      ].join("\r\n")
+    ).toString("base64url");
+
+    const requestBody: gmail_v1.Schema$Message = { raw };
+    if (options.threadId) {
+      requestBody.threadId = options.threadId;
+    }
+
+    const res = await this.gmail.users.messages.send({
+      userId: "me",
+      requestBody,
+    });
+
+    return {
+      messageId: res.data.id!,
+      threadId: res.data.threadId ?? undefined,
+    };
+  }
+
+  // -----------------------------------------------------------------------
   // batch_process — fetch structured data for Claude to decide on
   // -----------------------------------------------------------------------
 
