@@ -296,21 +296,102 @@ export class GmailService {
 
   private async sendUnsubscribeMail(toAddress: string): Promise<void> {
     // Compose a minimal unsubscribe email
-    const raw = Buffer.from(
-      [
-        `To: ${toAddress}`,
-        `Subject: Unsubscribe`,
-        `Content-Type: text/plain; charset="UTF-8"`,
-        "",
-        "Unsubscribe",
-      ].join("\r\n")
-    )
-      .toString("base64url");
+    const raw = await this.buildRawMessage({
+      to: toAddress,
+      subject: "Unsubscribe",
+      body: "Unsubscribe",
+    });
 
     await this.gmail.users.messages.send({
       userId: "me",
       requestBody: { raw },
     });
+  }
+
+  // -----------------------------------------------------------------------
+  // Outgoing-message construction (shared by create_draft / send_email)
+  // -----------------------------------------------------------------------
+
+  /**
+   * RFC 2047 "encoded-word" for header values that contain non-ASCII
+   * characters (e.g. Lithuanian subjects). Without this, raw UTF-8 bytes in
+   * the Subject header are decoded as Latin-1 by mail clients and show up as
+   * mojibake ("Nuoširdžiausias" → "NuoÅ¡irdÅ¾iausias").
+   */
+  private encodeHeaderValue(value: string): string {
+    // Printable ASCII only → safe to use as-is.
+    if (/^[\x20-\x7E]*$/.test(value)) return value;
+    return `=?UTF-8?B?${Buffer.from(value, "utf-8").toString("base64")}?=`;
+  }
+
+  /**
+   * Build In-Reply-To / References headers for a reply. Gmail only nests a
+   * message into an existing thread when the threadId, a matching Subject AND
+   * these RFC 2822 headers are all present — threadId alone is not enough.
+   * Best-effort: on any failure we fall back to threadId-only association.
+   */
+  private async getThreadingHeaders(
+    threadId?: string
+  ): Promise<{ inReplyTo?: string; references?: string }> {
+    if (!threadId) return {};
+    try {
+      const thread = await this.gmail.users.threads.get({
+        userId: "me",
+        id: threadId,
+        format: "metadata",
+        metadataHeaders: ["Message-ID", "References"],
+      });
+      const messages = thread.data.messages ?? [];
+      const last = messages[messages.length - 1];
+      const headers = last?.payload?.headers ?? [];
+      const hdr = (name: string) =>
+        headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())
+          ?.value ?? undefined;
+
+      const messageId = hdr("message-id");
+      if (!messageId) return {};
+
+      const existingRefs = hdr("references");
+      const references = existingRefs
+        ? `${existingRefs} ${messageId}`
+        : messageId;
+      return { inReplyTo: messageId, references };
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Assemble a base64url-encoded RFC 2822 message with a MIME-encoded subject,
+   * a base64 UTF-8 body, and (for replies) proper threading headers.
+   */
+  private async buildRawMessage(options: {
+    to: string;
+    subject: string;
+    body: string;
+    threadId?: string;
+  }): Promise<string> {
+    const { inReplyTo, references } = await this.getThreadingHeaders(
+      options.threadId
+    );
+
+    const headers = [
+      `To: ${options.to}`,
+      `Subject: ${this.encodeHeaderValue(options.subject)}`,
+      "MIME-Version: 1.0",
+      `Content-Type: text/plain; charset="UTF-8"`,
+      "Content-Transfer-Encoding: base64",
+    ];
+    if (inReplyTo) headers.push(`In-Reply-To: ${inReplyTo}`);
+    if (references) headers.push(`References: ${references}`);
+
+    // Base64-encode the UTF-8 body, wrapped at 76 chars per RFC 2045.
+    const encodedBody = Buffer.from(options.body, "utf-8")
+      .toString("base64")
+      .replace(/.{76}/g, "$&\r\n");
+
+    const message = headers.join("\r\n") + "\r\n\r\n" + encodedBody;
+    return Buffer.from(message, "utf-8").toString("base64url");
   }
 
   // -----------------------------------------------------------------------
@@ -323,15 +404,7 @@ export class GmailService {
     body: string;
     threadId?: string;
   }): Promise<{ draftId: string; threadId?: string }> {
-    const raw = Buffer.from(
-      [
-        `To: ${options.to}`,
-        `Subject: ${options.subject}`,
-        `Content-Type: text/plain; charset="UTF-8"`,
-        "",
-        options.body,
-      ].join("\r\n")
-    ).toString("base64url");
+    const raw = await this.buildRawMessage(options);
 
     const requestBody: gmail_v1.Schema$Draft = {
       message: { raw },
@@ -361,15 +434,7 @@ export class GmailService {
     body: string;
     threadId?: string;
   }): Promise<{ messageId: string; threadId?: string }> {
-    const raw = Buffer.from(
-      [
-        `To: ${options.to}`,
-        `Subject: ${options.subject}`,
-        `Content-Type: text/plain; charset="UTF-8"`,
-        "",
-        options.body,
-      ].join("\r\n")
-    ).toString("base64url");
+    const raw = await this.buildRawMessage(options);
 
     const requestBody: gmail_v1.Schema$Message = { raw };
     if (options.threadId) {
