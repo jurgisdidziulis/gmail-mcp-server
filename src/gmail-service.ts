@@ -34,6 +34,48 @@ export interface UnsubscribeResult {
   detail: string;
 }
 
+function sanitizeHeader(value: string): string {
+  return value.replace(/[\r\n]+/g, " ").trim();
+}
+
+function encodeHeader(value: string): string {
+  const sanitized = sanitizeHeader(value);
+  return /[^\x20-\x7e]/.test(sanitized)
+    ? `=?UTF-8?B?${Buffer.from(sanitized, "utf8").toString("base64")}?=`
+    : sanitized;
+}
+
+function extractAddress(value: string): string {
+  const match = value.match(/<([^>]+)>/);
+  return sanitizeHeader(match?.[1] ?? value);
+}
+
+function buildPlainTextMessage(options: {
+  to: string;
+  subject: string;
+  body: string;
+  inReplyTo?: string;
+  references?: string;
+}): string {
+  const headers = [
+    "MIME-Version: 1.0",
+    `To: ${sanitizeHeader(options.to)}`,
+    `Subject: ${encodeHeader(options.subject)}`,
+  ];
+
+  if (options.inReplyTo) {
+    headers.push(`In-Reply-To: ${sanitizeHeader(options.inReplyTo)}`);
+  }
+  if (options.references) {
+    headers.push(`References: ${sanitizeHeader(options.references)}`);
+  }
+
+  headers.push('Content-Type: text/plain; charset="UTF-8"');
+  headers.push("Content-Transfer-Encoding: 8bit");
+
+  return [...headers, "", options.body].join("\r\n");
+}
+
 // ---------------------------------------------------------------------------
 // Gmail Service — one instance per access token (per session)
 // ---------------------------------------------------------------------------
@@ -322,22 +364,42 @@ export class GmailService {
     subject: string;
     body: string;
     threadId?: string;
+    replyMessageId?: string;
   }): Promise<{ draftId: string; threadId?: string }> {
+    const replyTo = options.replyMessageId
+      ? await this.getEmail(options.replyMessageId)
+      : null;
+
+    const to = options.to || (replyTo ? extractAddress(replyTo.from) : "");
+    const subject =
+      options.subject ||
+      (replyTo?.subject
+        ? /^re:/i.test(replyTo.subject)
+          ? replyTo.subject
+          : `Re: ${replyTo.subject}`
+        : "");
+    const threadId = options.threadId ?? replyTo?.threadId;
+    const messageIdHeader = replyTo?.headers["Message-ID"];
+    const referencesHeader = replyTo
+      ? [replyTo.headers.References, messageIdHeader].filter(Boolean).join(" ")
+      : undefined;
+
     const raw = Buffer.from(
-      [
-        `To: ${options.to}`,
-        `Subject: ${options.subject}`,
-        `Content-Type: text/plain; charset="UTF-8"`,
-        "",
-        options.body,
-      ].join("\r\n")
+      buildPlainTextMessage({
+        to,
+        subject,
+        body: options.body,
+        inReplyTo: messageIdHeader,
+        references: referencesHeader,
+      }),
+      "utf8"
     ).toString("base64url");
 
     const requestBody: gmail_v1.Schema$Draft = {
       message: { raw },
     };
-    if (options.threadId) {
-      requestBody.message!.threadId = options.threadId;
+    if (threadId) {
+      requestBody.message!.threadId = threadId;
     }
 
     const res = await this.gmail.users.drafts.create({
@@ -360,20 +422,40 @@ export class GmailService {
     subject: string;
     body: string;
     threadId?: string;
+    replyMessageId?: string;
   }): Promise<{ messageId: string; threadId?: string }> {
+    const replyTo = options.replyMessageId
+      ? await this.getEmail(options.replyMessageId)
+      : null;
+
+    const to = options.to || (replyTo ? extractAddress(replyTo.from) : "");
+    const subject =
+      options.subject ||
+      (replyTo?.subject
+        ? /^re:/i.test(replyTo.subject)
+          ? replyTo.subject
+          : `Re: ${replyTo.subject}`
+        : "");
+    const threadId = options.threadId ?? replyTo?.threadId;
+    const messageIdHeader = replyTo?.headers["Message-ID"];
+    const referencesHeader = replyTo
+      ? [replyTo.headers.References, messageIdHeader].filter(Boolean).join(" ")
+      : undefined;
+
     const raw = Buffer.from(
-      [
-        `To: ${options.to}`,
-        `Subject: ${options.subject}`,
-        `Content-Type: text/plain; charset="UTF-8"`,
-        "",
-        options.body,
-      ].join("\r\n")
+      buildPlainTextMessage({
+        to,
+        subject,
+        body: options.body,
+        inReplyTo: messageIdHeader,
+        references: referencesHeader,
+      }),
+      "utf8"
     ).toString("base64url");
 
     const requestBody: gmail_v1.Schema$Message = { raw };
-    if (options.threadId) {
-      requestBody.threadId = options.threadId;
+    if (threadId) {
+      requestBody.threadId = threadId;
     }
 
     const res = await this.gmail.users.messages.send({

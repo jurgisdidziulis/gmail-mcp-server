@@ -348,14 +348,21 @@ function createMcpServer(): McpServer {
         .describe(
           "Optional Gmail thread ID to attach this draft to an existing conversation"
         ),
+      reply_message_id: z
+        .string()
+        .optional()
+        .describe(
+          "Optional original Gmail message ID to create this draft as a properly threaded reply"
+        ),
     },
-    async ({ account, to, subject, body, thread_id }) => {
+    async ({ account, to, subject, body, thread_id, reply_message_id }) => {
       const gmail = await getGmailServiceForAccount(account);
       const result = await gmail.createDraft({
         to,
         subject,
         body,
         threadId: thread_id,
+        replyMessageId: reply_message_id,
       });
       return {
         content: [
@@ -389,14 +396,21 @@ function createMcpServer(): McpServer {
         .describe(
           "Optional Gmail thread ID to send this as a reply in an existing conversation"
         ),
+      reply_message_id: z
+        .string()
+        .optional()
+        .describe(
+          "Optional original Gmail message ID to send this as a properly threaded reply"
+        ),
     },
-    async ({ account, to, subject, body, thread_id }) => {
+    async ({ account, to, subject, body, thread_id, reply_message_id }) => {
       const gmail = await getGmailServiceForAccount(account);
       const result = await gmail.sendEmail({
         to,
         subject,
         body,
         threadId: thread_id,
+        replyMessageId: reply_message_id,
       });
       return {
         content: [
