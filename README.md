@@ -105,6 +105,7 @@ This Gmail MCP server turns any MCP-compatible AI client into a full-featured em
 | `GOOGLE_CLIENT_SECRET` | Your OAuth Client Secret |
 | `ENCRYPTION_KEY` | Any random string (32+ characters) |
 | `ADMIN_PASSWORD` | Password for the setup page |
+| `OFFICE_BACKEND_KEY_SHA256` | SHA-256 digest of the backend key required on every `/mcp` request |
 | `SERVER_URL` | Your Railway app URL (e.g., `https://your-app.railway.app`) |
 | `PORT` | `3000` |
 
@@ -255,6 +256,7 @@ Gmail API (per-account OAuth tokens)
 
 ## Security
 
+- **Authenticated MCP boundary.** Every `/mcp` request must include the backend key whose SHA-256 digest is configured as `OFFICE_BACKEND_KEY_SHA256`.
 - **OAuth 2.0** for authentication with Google
 - **AES-256-GCM** encrypted refresh token storage
 - **Minimal scopes** using only `gmail.readonly` and `gmail.modify`

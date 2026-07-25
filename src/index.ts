@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { google } from "googleapis";
 import { z } from "zod";
+import { createBackendAuth } from "./backend-auth.js";
 import { GmailService } from "./gmail-service.js";
 import { TokenStore } from "./token-store.js";
 
@@ -15,6 +16,7 @@ const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD!;
+const OFFICE_BACKEND_KEY_SHA256 = process.env.OFFICE_BACKEND_KEY_SHA256 ?? "";
 const SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/gmail.modify",
@@ -435,6 +437,7 @@ function createMcpServer(): McpServer {
 // ---------------------------------------------------------------------------
 
 const app = express();
+app.use("/mcp", createBackendAuth(OFFICE_BACKEND_KEY_SHA256));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
