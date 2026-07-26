@@ -5,6 +5,17 @@ import { google } from "googleapis";
 import { z } from "zod";
 import { createBackendAuth } from "./backend-auth.js";
 import { GmailService } from "./gmail-service.js";
+import {
+  getHostingerImapConfig,
+  ImapReadService,
+} from "./imap-read-service.js";
+import {
+  assertMailOperationAllowed,
+  isHostingerAccount,
+  listConnectedMailAccounts,
+  resolveMailAccounts,
+  resolveSingleMailAccount,
+} from "./mail-account-routing.js";
 import { TokenStore } from "./token-store.js";
 
 // ---------------------------------------------------------------------------
@@ -17,6 +28,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD!;
 const OFFICE_BACKEND_KEY_SHA256 = process.env.OFFICE_BACKEND_KEY_SHA256 ?? "";
+const hostingerImapConfig = getHostingerImapConfig();
 const SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/gmail.modify",
@@ -62,21 +74,26 @@ async function getGmailServiceForAccount(email: string): Promise<GmailService> {
   return new GmailService(token);
 }
 
+type ReadMailService = Pick<
+  GmailService,
+  "listEmails" | "getEmail" | "batchProcess"
+>;
+
+async function getReadServiceForAccount(
+  email: string
+): Promise<ReadMailService> {
+  if (isHostingerAccount(email, hostingerImapConfig)) {
+    return new ImapReadService(hostingerImapConfig!);
+  }
+  return getGmailServiceForAccount(email);
+}
+
 function resolveAccounts(account: string): string[] {
-  if (account.toLowerCase() === "all") {
-    const all = tokenStore.listAccounts().map((a) => a.email);
-    if (all.length === 0) {
-      throw new Error("No accounts connected. Add accounts via the /setup page.");
-    }
-    return all;
-  }
-  if (!tokenStore.hasAccount(account)) {
-    const available = tokenStore.listAccounts().map((a) => a.email);
-    throw new Error(
-      `Account "${account}" is not connected. Available accounts: ${available.join(", ") || "none"}`
-    );
-  }
-  return [account];
+  return resolveMailAccounts(
+    account,
+    tokenStore.listAccounts(),
+    hostingerImapConfig
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -92,10 +109,13 @@ function createMcpServer(): McpServer {
   // ---- list_accounts ----
   server.tool(
     "list_accounts",
-    "List all connected Gmail accounts. Use the email addresses returned here as the 'account' parameter in other tools.",
+    "List connected mail accounts and their provider/read-only status. Use the returned email addresses as the account parameter in other tools.",
     {},
     async () => {
-      const accounts = tokenStore.listAccounts();
+      const accounts = listConnectedMailAccounts(
+        tokenStore.listAccounts(),
+        hostingerImapConfig
+      );
       return {
         content: [
           {
@@ -104,7 +124,7 @@ function createMcpServer(): McpServer {
               {
                 connected_accounts: accounts,
                 usage_hint:
-                  "Use any email address as the 'account' parameter, or use 'all' to query every account.",
+                  "Use an exact email address. account='all' intentionally queries the existing Gmail accounts only; query jurgis@in.lt explicitly for Hostinger.",
               },
               null,
               2
@@ -115,21 +135,49 @@ function createMcpServer(): McpServer {
     }
   );
 
+  // ---- check_hostinger_connection ----
+  server.tool(
+    "check_hostinger_connection",
+    "Verify the configured Hostinger IMAP account using INBOX folder metadata only. Does not fetch message envelopes or bodies and never changes mailbox state.",
+    {
+      account: z
+        .string()
+        .describe("Exact Hostinger account address to verify"),
+    },
+    async ({ account }) => {
+      resolveAccounts(account);
+      if (!isHostingerAccount(account, hostingerImapConfig)) {
+        throw new Error("This check is available only for the Hostinger IMAP account");
+      }
+      const result = await new ImapReadService(
+        hostingerImapConfig!
+      ).checkConnection();
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
   // ---- list_emails ----
   server.tool(
     "list_emails",
-    "Search and list emails. Supports Gmail search syntax (is:unread, from:, newer_than:7d, etc). Use account='all' to search across all connected accounts.",
+    "Search and list emails. Gmail supports its native query syntax; Hostinger supports is:unread, is:read, from:, subject:, and newer_than:Nd. account='all' intentionally searches Gmail accounts only.",
     {
       account: z
         .string()
         .describe(
-          "Email address of the account to search, or 'all' for every connected account"
+          "Email address to search, or 'all' for the existing Gmail accounts only"
         ),
       query: z
         .string()
         .optional()
         .describe(
-          "Gmail search query (e.g. 'is:unread', 'from:user@example.com newer_than:2d', 'subject:invoice')"
+          "Provider query. Hostinger allows only is:unread, is:read, from:, subject:, and newer_than:Nd"
         ),
       max_results: z
         .number()
@@ -144,10 +192,11 @@ function createMcpServer(): McpServer {
 
       for (const email of accounts) {
         try {
-          const gmail = await getGmailServiceForAccount(email);
-          const emails = await gmail.listEmails(query, max_results);
+          const service = await getReadServiceForAccount(email);
+          const emails = await service.listEmails(query, max_results);
           allResults.push({ account: email, emails });
-        } catch (err: any) {
+        } catch (err) {
+          if (isHostingerAccount(email, hostingerImapConfig)) throw err;
           allResults.push({
             account: email,
             emails: [],
@@ -174,16 +223,21 @@ function createMcpServer(): McpServer {
       account: z
         .string()
         .describe("Email address of the account this message belongs to"),
-      message_id: z.string().describe("The Gmail message ID"),
+      message_id: z.string().describe("Provider-specific message ID"),
     },
     async ({ account, message_id }) => {
-      const gmail = await getGmailServiceForAccount(account);
-      const email = await gmail.getEmail(message_id);
+      const resolvedAccount = resolveSingleMailAccount(
+        account,
+        tokenStore.listAccounts(),
+        hostingerImapConfig
+      );
+      const service = await getReadServiceForAccount(resolvedAccount);
+      const email = await service.getEmail(message_id);
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify({ account, ...email }, null, 2),
+            text: JSON.stringify({ account: resolvedAccount, ...email }, null, 2),
           },
         ],
       };
@@ -201,6 +255,7 @@ function createMcpServer(): McpServer {
       message_id: z.string().describe("The Gmail message ID to archive"),
     },
     async ({ account, message_id }) => {
+      assertMailOperationAllowed(account, "archive_email", hostingerImapConfig);
       const gmail = await getGmailServiceForAccount(account);
       const result = await gmail.archiveEmail(message_id);
       return {
@@ -234,6 +289,7 @@ function createMcpServer(): McpServer {
         ),
     },
     async ({ account, message_id, label_name }) => {
+      assertMailOperationAllowed(account, "apply_label", hostingerImapConfig);
       const gmail = await getGmailServiceForAccount(account);
       const result = await gmail.applyLabel(message_id, label_name);
       return {
@@ -264,6 +320,7 @@ function createMcpServer(): McpServer {
         .describe("The Gmail message ID to unsubscribe from"),
     },
     async ({ account, message_id }) => {
+      assertMailOperationAllowed(account, "unsubscribe_email", hostingerImapConfig);
       const gmail = await getGmailServiceForAccount(account);
       const result = await gmail.unsubscribeEmail(message_id);
       return {
@@ -280,17 +337,17 @@ function createMcpServer(): McpServer {
   // ---- batch_process ----
   server.tool(
     "batch_process",
-    "Fetch a batch of emails matching a query for triage. Returns structured data so you can decide which actions to take on each email. Use account='all' to scan all accounts.",
+    "Fetch a read-only batch of emails for triage. account='all' intentionally scans Gmail accounts only; use the exact Hostinger address to scan it separately.",
     {
       account: z
         .string()
         .describe(
-          "Email address of the account to search, or 'all' for every connected account"
+          "Email address to search, or 'all' for the existing Gmail accounts only"
         ),
       query: z
         .string()
         .describe(
-          "Gmail search query (e.g. 'is:unread category:promotions', 'newer_than:7d')"
+          "Provider query. Hostinger allows only is:unread, is:read, from:, subject:, and newer_than:Nd"
         ),
       max_results: z
         .number()
@@ -305,10 +362,11 @@ function createMcpServer(): McpServer {
 
       for (const email of accounts) {
         try {
-          const gmail = await getGmailServiceForAccount(email);
-          const emails = await gmail.batchProcess(query, max_results);
+          const service = await getReadServiceForAccount(email);
+          const emails = await service.batchProcess(query, max_results);
           allResults.push({ account: email, emails });
-        } catch (err: any) {
+        } catch (err) {
+          if (isHostingerAccount(email, hostingerImapConfig)) throw err;
           allResults.push({ account: email, emails: [] });
         }
       }
@@ -358,6 +416,7 @@ function createMcpServer(): McpServer {
         ),
     },
     async ({ account, to, subject, body, thread_id, reply_message_id }) => {
+      assertMailOperationAllowed(account, "create_draft", hostingerImapConfig);
       const gmail = await getGmailServiceForAccount(account);
       const result = await gmail.createDraft({
         to,
@@ -374,54 +433,6 @@ function createMcpServer(): McpServer {
               account,
               ...result,
               message: `Draft created successfully in ${account}.`,
-            }),
-          },
-        ],
-      };
-    }
-  );
-
-  // ---- send_email ----
-  server.tool(
-    "send_email",
-    "Send an email from the specified Gmail account. Use thread_id to send as a reply within an existing conversation.",
-    {
-      account: z
-        .string()
-        .describe("Email address of the Gmail account to send from"),
-      to: z.string().describe("Recipient email address"),
-      subject: z.string().describe("Email subject line"),
-      body: z.string().describe("Email body text"),
-      thread_id: z
-        .string()
-        .optional()
-        .describe(
-          "Optional Gmail thread ID to send this as a reply in an existing conversation"
-        ),
-      reply_message_id: z
-        .string()
-        .optional()
-        .describe(
-          "Optional original Gmail message ID to send this as a properly threaded reply"
-        ),
-    },
-    async ({ account, to, subject, body, thread_id, reply_message_id }) => {
-      const gmail = await getGmailServiceForAccount(account);
-      const result = await gmail.sendEmail({
-        to,
-        subject,
-        body,
-        threadId: thread_id,
-        replyMessageId: reply_message_id,
-      });
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              account,
-              ...result,
-              message: `Email sent successfully from ${account}.`,
             }),
           },
         ],
@@ -632,7 +643,12 @@ app.get("/oauth/callback", async (req: Request, res: Response) => {
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
-    accounts: tokenStore.size,
+    accounts: tokenStore.size + (hostingerImapConfig ? 1 : 0),
+    gmail_accounts: tokenStore.size,
+    hostinger_imap: {
+      configured: Boolean(hostingerImapConfig),
+      read_only: true,
+    },
   });
 });
 
@@ -693,5 +709,7 @@ app.listen(PORT, () => {
   console.log(`  MCP endpoint:  ${SERVER_URL}/mcp`);
   console.log(`  Setup page:    ${SERVER_URL}/setup`);
   console.log(`  Health check:  ${SERVER_URL}/health`);
-  console.log(`  Accounts:      ${tokenStore.size}`);
+  console.log(
+    `  Accounts:      ${tokenStore.size + (hostingerImapConfig ? 1 : 0)} (${tokenStore.size} Gmail, Hostinger IMAP ${hostingerImapConfig ? "enabled read-only" : "disabled"})`
+  );
 });

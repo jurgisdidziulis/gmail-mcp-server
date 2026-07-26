@@ -60,13 +60,17 @@ This Gmail MCP server turns any MCP-compatible AI client into a full-featured em
 
 | Tool | Description |
 |---|---|
-| `list_accounts` | List all connected Gmail accounts |
-| `list_emails` | Search and list emails using Gmail query syntax. Supports `account="all"` |
-| `get_email` | Get full email content, headers, and parsed unsubscribe links |
-| `archive_email` | Archive an email by removing it from the inbox |
-| `apply_label` | Apply a label to an email. Creates the label if it doesn't exist |
-| `unsubscribe_email` | Auto-unsubscribe from mailing lists and newsletters |
-| `batch_process` | Fetch a batch of emails for triage. Supports `account="all"` |
+| `list_accounts` | List connected Gmail and optional Hostinger IMAP accounts, including read-only status |
+| `check_hostinger_connection` | Verify Hostinger INBOX metadata over read-only IMAP without fetching messages |
+| `list_emails` | Search and list emails. `account="all"` intentionally targets Gmail accounts only |
+| `get_email` | Get full email content and headers from the selected provider |
+| `archive_email` | Archive a Gmail email; disabled for Hostinger |
+| `apply_label` | Apply a Gmail label; disabled for Hostinger |
+| `unsubscribe_email` | Gmail-only unsubscribe workflow; disabled for Hostinger |
+| `batch_process` | Fetch a read-only batch for triage. Query Hostinger by its exact address |
+| `create_draft` | Create a Gmail draft; disabled for Hostinger |
+
+The production MCP intentionally exposes no raw `send_email` tool.
 
 ---
 
@@ -108,6 +112,11 @@ This Gmail MCP server turns any MCP-compatible AI client into a full-featured em
 | `OFFICE_BACKEND_KEY_SHA256` | SHA-256 digest of the backend key required on every `/mcp` request |
 | `SERVER_URL` | Your Railway app URL (e.g., `https://your-app.railway.app`) |
 | `PORT` | `3000` |
+| `HOSTINGER_IMAP_ENABLED` | Optional: `true` enables the read-only Hostinger adapter |
+| `HOSTINGER_IMAP_ACCOUNT` | Optional: must be the approved mailbox `jurgis@in.lt` |
+| `HOSTINGER_IMAP_PASSWORD` | Optional: mailbox password, entered only as a deployment secret |
+
+When enabled, Hostinger is pinned to `imap.hostinger.com:993` with TLS certificate validation and opens `INBOX` with `readOnly: true`. There is no Hostinger SMTP configuration or mailbox-mutation implementation. Set the password directly in Railway Variables or another deployment secret manager—never in source control, command history, chat, or logs.
 
 3. Generate a domain in Railway (Service → Settings → Networking → Generate Domain)
 4. Update `SERVER_URL` with the generated domain
@@ -289,7 +298,7 @@ The `list_emails` and `batch_process` tools accept Gmail's full search syntax:
 
 Want to help make this better? Here are some open ideas:
 
-- [ ] Add `send_email` tool for composing and sending emails
+- [x] Keep raw external sending unavailable; outbound mail must use the governed Office approval route
 - [ ] Add `reply_to_email` tool
 - [ ] Add email attachment download support
 - [ ] Add `delete_email` tool
