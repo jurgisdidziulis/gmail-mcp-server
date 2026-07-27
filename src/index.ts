@@ -123,6 +123,8 @@ function createMcpServer(): McpServer {
             text: JSON.stringify(
               {
                 connected_accounts: accounts,
+                pagination_complete: true,
+                inventory_version: 1,
                 usage_hint:
                   "Use an exact email address. account='all' intentionally queries the existing Gmail accounts only; query jurgis@in.lt explicitly for Hostinger.",
               },
