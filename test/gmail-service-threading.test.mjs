@@ -30,6 +30,32 @@ function replyMessage(threadId = "thread-1") {
   };
 }
 
+function draftMessage(threadId = "thread-1", id = "draft-message-1") {
+  return {
+    data: {
+      id: "draft-1",
+      message: {
+        id,
+        threadId,
+        snippet: "Draft body",
+        labelIds: ["DRAFT"],
+        payload: {
+          headers: [
+            { name: "Subject", value: "Re: Original subject" },
+            { name: "From", value: "Me <me@example.com>" },
+            { name: "To", value: "Client <client@example.com>" },
+            { name: "Date", value: "Tue, 4 Aug 2026 10:05:00 +0000" },
+            { name: "In-Reply-To", value: "<reply-message-1@example.com>" },
+            { name: "References", value: "<prior@example.com> <reply-message-1@example.com>" },
+          ],
+          body: { data: Buffer.from("Draft body").toString("base64url") },
+          mimeType: "text/plain",
+        },
+      },
+    },
+  };
+}
+
 test("createDraft rejects mismatched thread_id and reply_message_id before draft creation", async () => {
   let draftCreateCalls = 0;
   const service = serviceWithMock({
@@ -137,4 +163,63 @@ test("createDraft returns provider verification when draft is a thread member", 
   assert.equal(result.threaded, true);
   assert.equal(result.threadVerification?.method, "gmail.threads.get");
   assert.equal(result.threadVerification?.draftInThread, true);
+});
+
+test("updateDraft updates in place and verifies provider thread membership", async () => {
+  let updatedDraftId = "";
+  const service = serviceWithMock({
+    users: {
+      messages: {
+        get: async () => replyMessage("thread-1"),
+      },
+      drafts: {
+        get: async () => draftMessage("thread-1", "draft-message-2"),
+        update: async ({ id }) => {
+          updatedDraftId = id;
+          return {
+            data: {
+              id,
+              message: { id: "draft-message-2", threadId: "thread-1" },
+            },
+          };
+        },
+      },
+      threads: {
+        get: async () => ({
+          data: {
+            messages: [{ id: "reply-message-1" }, { id: "draft-message-2" }],
+          },
+        }),
+      },
+    },
+  });
+
+  const result = await service.updateDraft({
+    draftId: "draft-1",
+    body: "Updated body",
+    threadId: "thread-1",
+    replyMessageId: "reply-message-1",
+  });
+
+  assert.equal(updatedDraftId, "draft-1");
+  assert.equal(result.draftId, "draft-1");
+  assert.equal(result.threadVerification?.draftInThread, true);
+});
+
+test("deleteDraft deletes only the exact draft ID", async () => {
+  let deletedDraftId = "";
+  const service = serviceWithMock({
+    users: {
+      drafts: {
+        delete: async ({ id }) => {
+          deletedDraftId = id;
+          return {};
+        },
+      },
+    },
+  });
+
+  const result = await service.deleteDraft("draft-to-delete");
+  assert.equal(deletedDraftId, "draft-to-delete");
+  assert.equal(result.success, true);
 });

@@ -49,6 +49,11 @@ export interface DraftResult {
   };
 }
 
+export interface DraftDetail extends EmailDetail {
+  draftId: string;
+  threadVerification?: DraftResult["threadVerification"];
+}
+
 function sanitizeHeader(value: string): string {
   return value.replace(/[\r\n]+/g, " ").trim();
 }
@@ -476,6 +481,149 @@ export class GmailService {
     };
   }
 
+  async listDrafts(
+    query?: string,
+    maxResults: number = 20
+  ): Promise<DraftDetail[]> {
+    const res = await this.gmail.users.drafts.list({
+      userId: "me",
+      q: query || undefined,
+      maxResults: Math.min(maxResults, 100),
+    });
+
+    const drafts = res.data.drafts ?? [];
+    return Promise.all(
+      drafts.map((draft) => this.getDraft(draft.id!))
+    );
+  }
+
+  async getDraft(
+    draftId: string,
+    expectedThreadId?: string
+  ): Promise<DraftDetail> {
+    const res = await this.gmail.users.drafts.get({
+      userId: "me",
+      id: draftId,
+      format: "full",
+    });
+    const message = res.data.message;
+    if (!message?.id) {
+      throw new Error(`Draft ${draftId} did not contain a Gmail message.`);
+    }
+
+    const detail = this.emailDetailFromMessage(message);
+    const threadVerification = expectedThreadId
+      ? await this.verifyDraftThreadMembership(expectedThreadId, message.id)
+      : undefined;
+
+    return {
+      draftId,
+      ...detail,
+      threadVerification,
+    };
+  }
+
+  async updateDraft(options: {
+    draftId: string;
+    to?: string;
+    subject?: string;
+    body: string;
+    threadId?: string;
+    replyMessageId?: string;
+  }): Promise<DraftResult> {
+    if (options.threadId && !options.replyMessageId) {
+      throw new Error("reply_message_id is required when thread_id is supplied.");
+    }
+
+    const existingDraft = await this.getDraft(options.draftId);
+    const replyTo = options.replyMessageId
+      ? await this.getEmail(options.replyMessageId)
+      : null;
+
+    if (options.threadId && replyTo?.threadId && options.threadId !== replyTo.threadId) {
+      throw new Error(
+        "thread_id does not match the provider thread for reply_message_id."
+      );
+    }
+
+    const threadId = options.threadId ?? replyTo?.threadId ?? existingDraft.threadId;
+    const to = options.to || (replyTo ? extractAddress(replyTo.from) : existingDraft.to);
+    const subject =
+      options.subject ||
+      (replyTo?.subject
+        ? /^re:/i.test(replyTo.subject)
+          ? replyTo.subject
+          : `Re: ${replyTo.subject}`
+        : existingDraft.subject);
+    const messageIdHeader = replyTo?.headers["Message-ID"];
+    const referencesHeader = replyTo
+      ? [replyTo.headers.References, messageIdHeader].filter(Boolean).join(" ")
+      : existingDraft.headers.References;
+
+    const raw = Buffer.from(
+      buildPlainTextMessage({
+        to,
+        subject,
+        body: options.body,
+        inReplyTo: messageIdHeader ?? existingDraft.headers["In-Reply-To"],
+        references: referencesHeader,
+      }),
+      "utf8"
+    ).toString("base64url");
+
+    const requestBody: gmail_v1.Schema$Draft = {
+      id: options.draftId,
+      message: { raw },
+    };
+    if (threadId) {
+      requestBody.message!.threadId = threadId;
+    }
+
+    const res = await this.gmail.users.drafts.update({
+      userId: "me",
+      id: options.draftId,
+      requestBody,
+    });
+
+    const draftMessageId =
+      res.data.message?.id ??
+      (
+        await this.gmail.users.drafts.get({
+          userId: "me",
+          id: options.draftId,
+          format: "metadata",
+        })
+      ).data.message?.id ?? undefined;
+    const returnedThreadId = res.data.message?.threadId ?? threadId;
+
+    const verification = threadId
+      ? await this.verifyDraftThreadMembership(threadId, draftMessageId)
+      : undefined;
+
+    if (threadId && !verification?.draftInThread) {
+      throw new Error(
+        "Draft was updated but Gmail threads.get does not show it in the requested thread."
+      );
+    }
+
+    return {
+      draftId: options.draftId,
+      messageId: draftMessageId,
+      threadId: returnedThreadId,
+      replyMessageId: options.replyMessageId,
+      threaded: Boolean(threadId),
+      threadVerification: verification,
+    };
+  }
+
+  async deleteDraft(draftId: string): Promise<{ success: boolean; draftId: string }> {
+    await this.gmail.users.drafts.delete({
+      userId: "me",
+      id: draftId,
+    });
+    return { success: true, draftId };
+  }
+
   async verifyDraftThreadMembership(
     expectedThreadId: string,
     draftMessageId?: string
@@ -569,6 +717,35 @@ export class GmailService {
   // -----------------------------------------------------------------------
   // Helpers
   // -----------------------------------------------------------------------
+
+  private emailDetailFromMessage(message: gmail_v1.Schema$Message): EmailDetail {
+    const headers = message.payload?.headers ?? [];
+    const hdr = (name: string) =>
+      headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())
+        ?.value ?? "";
+
+    const headersMap: Record<string, string> = {};
+    for (const h of headers) {
+      if (h.name && h.value) headersMap[h.name] = h.value;
+    }
+
+    const body = this.extractBody(message.payload ?? {});
+    const unsubscribeLinks = this.parseUnsubscribeLinks(headersMap, body);
+
+    return {
+      id: message.id!,
+      threadId: message.threadId!,
+      subject: hdr("Subject"),
+      from: hdr("From"),
+      to: hdr("To"),
+      date: hdr("Date"),
+      snippet: message.snippet ?? "",
+      body,
+      labelIds: message.labelIds ?? [],
+      headers: headersMap,
+      unsubscribeLinks,
+    };
+  }
 
   private extractBody(payload: gmail_v1.Schema$MessagePart): string {
     // Prefer text/plain, fall back to text/html

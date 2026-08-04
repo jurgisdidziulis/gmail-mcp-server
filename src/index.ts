@@ -396,7 +396,7 @@ function createMcpServer(): McpServer {
   // ---- create_draft ----
   server.tool(
     "create_draft",
-    "Create a draft email in the specified Gmail account's Drafts folder. The draft will be visible in Gmail and email clients like Spark.",
+    "Create a draft email in the specified Gmail account's Drafts folder. Threaded replies require reply_message_id and are verified with Gmail threads.get.",
     {
       account: z
         .string()
@@ -436,6 +436,161 @@ function createMcpServer(): McpServer {
               ...result,
               message: `Draft created successfully in ${account}.`,
             }),
+          },
+        ],
+      };
+    }
+  );
+
+  // ---- list_drafts ----
+  server.tool(
+    "list_drafts",
+    "List Gmail drafts with message IDs, thread IDs, headers, and snippets. Use before cleanup so obsolete standalone drafts can be enumerated exactly.",
+    {
+      account: z
+        .string()
+        .describe("Email address of the Gmail account to inspect"),
+      query: z
+        .string()
+        .optional()
+        .describe("Optional Gmail draft search query, for example subject text"),
+      max_results: z
+        .number()
+        .min(1)
+        .max(100)
+        .default(20)
+        .describe("Maximum number of drafts to return"),
+    },
+    async ({ account, query, max_results }) => {
+      const resolvedAccount = resolveSingleMailAccount(
+        account,
+        tokenStore.listAccounts(),
+        hostingerImapConfig
+      );
+      assertMailOperationAllowed(resolvedAccount, "list_drafts", hostingerImapConfig);
+      const gmail = await getGmailServiceForAccount(resolvedAccount);
+      const drafts = await gmail.listDrafts(query, max_results);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                account: resolvedAccount,
+                total: drafts.length,
+                query: query ?? null,
+                drafts,
+                pagination_complete: drafts.length < max_results,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+
+  // ---- get_draft ----
+  server.tool(
+    "get_draft",
+    "Read one Gmail draft by draft ID and optionally verify that its message is visible inside an expected Gmail thread.",
+    {
+      account: z
+        .string()
+        .describe("Email address of the Gmail account this draft belongs to"),
+      draft_id: z.string().describe("The Gmail draft ID"),
+      expected_thread_id: z
+        .string()
+        .optional()
+        .describe("Optional thread ID that must contain the draft message"),
+    },
+    async ({ account, draft_id, expected_thread_id }) => {
+      const resolvedAccount = resolveSingleMailAccount(
+        account,
+        tokenStore.listAccounts(),
+        hostingerImapConfig
+      );
+      assertMailOperationAllowed(resolvedAccount, "get_draft", hostingerImapConfig);
+      const gmail = await getGmailServiceForAccount(resolvedAccount);
+      const draft = await gmail.getDraft(draft_id, expected_thread_id);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ account: resolvedAccount, ...draft }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  // ---- update_draft ----
+  server.tool(
+    "update_draft",
+    "Update an existing Gmail draft in place. Threaded replies require reply_message_id and are verified with Gmail threads.get after update.",
+    {
+      account: z
+        .string()
+        .describe("Email address of the Gmail account this draft belongs to"),
+      draft_id: z.string().describe("The Gmail draft ID to update"),
+      to: z.string().optional().describe("Recipient email address"),
+      subject: z.string().optional().describe("Email subject line"),
+      body: z.string().describe("Replacement email body text"),
+      thread_id: z
+        .string()
+        .optional()
+        .describe("Optional Gmail thread ID for an in-thread draft reply"),
+      reply_message_id: z
+        .string()
+        .optional()
+        .describe("Original Gmail message ID used to bind reply headers"),
+    },
+    async ({ account, draft_id, to, subject, body, thread_id, reply_message_id }) => {
+      assertMailOperationAllowed(account, "update_draft", hostingerImapConfig);
+      const gmail = await getGmailServiceForAccount(account);
+      const result = await gmail.updateDraft({
+        draftId: draft_id,
+        to,
+        subject,
+        body,
+        threadId: thread_id,
+        replyMessageId: reply_message_id,
+      });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              account,
+              ...result,
+              message: `Draft ${draft_id} updated successfully in ${account}.`,
+            }),
+          },
+        ],
+      };
+    }
+  );
+
+  // ---- delete_draft ----
+  server.tool(
+    "delete_draft",
+    "Delete one Gmail draft by exact draft ID. This never sends mail and should be used only after exact enumeration.",
+    {
+      account: z
+        .string()
+        .describe("Email address of the Gmail account this draft belongs to"),
+      draft_id: z.string().describe("The exact Gmail draft ID to delete"),
+    },
+    async ({ account, draft_id }) => {
+      assertMailOperationAllowed(account, "delete_draft", hostingerImapConfig);
+      const gmail = await getGmailServiceForAccount(account);
+      const result = await gmail.deleteDraft(draft_id);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ account, ...result }, null, 2),
           },
         ],
       };
