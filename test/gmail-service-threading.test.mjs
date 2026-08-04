@@ -48,8 +48,19 @@ function draftMessage(threadId = "thread-1", id = "draft-message-1") {
             { name: "In-Reply-To", value: "<reply-message-1@example.com>" },
             { name: "References", value: "<prior@example.com> <reply-message-1@example.com>" },
           ],
-          body: { data: Buffer.from("Draft body").toString("base64url") },
-          mimeType: "text/plain",
+          mimeType: "multipart/mixed",
+          parts: [
+            {
+              mimeType: "text/plain",
+              body: { data: Buffer.from("Draft body").toString("base64url") },
+            },
+            {
+              partId: "1",
+              filename: "invoice.pdf",
+              mimeType: "application/pdf",
+              body: { attachmentId: "attachment-1", size: 1234 },
+            },
+          ],
         },
       },
     },
@@ -222,4 +233,25 @@ test("deleteDraft deletes only the exact draft ID", async () => {
   const result = await service.deleteDraft("draft-to-delete");
   assert.equal(deletedDraftId, "draft-to-delete");
   assert.equal(result.success, true);
+});
+
+test("getDraft exposes attachment metadata for read-back", async () => {
+  const service = serviceWithMock({
+    users: {
+      drafts: {
+        get: async () => draftMessage("thread-1", "draft-message-1"),
+      },
+    },
+  });
+
+  const result = await service.getDraft("draft-1");
+  assert.deepEqual(result.attachments, [
+    {
+      filename: "invoice.pdf",
+      mimeType: "application/pdf",
+      attachmentId: "attachment-1",
+      size: 1234,
+      partId: "1",
+    },
+  ]);
 });

@@ -25,7 +25,16 @@ export interface EmailDetail {
   body: string;
   labelIds: string[];
   headers: Record<string, string>;
+  attachments: AttachmentSummary[];
   unsubscribeLinks: string[];
+}
+
+export interface AttachmentSummary {
+  filename: string;
+  mimeType: string;
+  attachmentId?: string;
+  size?: number;
+  partId?: string;
 }
 
 export interface UnsubscribeResult {
@@ -193,6 +202,7 @@ export class GmailService {
       body,
       labelIds: res.data.labelIds ?? [],
       headers: headersMap,
+      attachments: this.extractAttachments(res.data.payload),
       unsubscribeLinks,
     };
   }
@@ -743,8 +753,32 @@ export class GmailService {
       body,
       labelIds: message.labelIds ?? [],
       headers: headersMap,
+      attachments: this.extractAttachments(message.payload),
       unsubscribeLinks,
     };
+  }
+
+  private extractAttachments(
+    payload?: gmail_v1.Schema$MessagePart
+  ): AttachmentSummary[] {
+    if (!payload) return [];
+    const attachments: AttachmentSummary[] = [];
+    const visit = (part: gmail_v1.Schema$MessagePart) => {
+      const filename = part.filename ?? "";
+      const attachmentId = part.body?.attachmentId ?? undefined;
+      if (filename || attachmentId) {
+        attachments.push({
+          filename,
+          mimeType: part.mimeType ?? "",
+          attachmentId,
+          size: part.body?.size ?? undefined,
+          partId: part.partId ?? undefined,
+        });
+      }
+      for (const child of part.parts ?? []) visit(child);
+    };
+    visit(payload);
+    return attachments;
   }
 
   private extractBody(payload: gmail_v1.Schema$MessagePart): string {

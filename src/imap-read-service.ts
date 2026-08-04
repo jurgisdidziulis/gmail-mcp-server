@@ -415,6 +415,7 @@ export class ImapReadService {
         body: parsed.text ?? parsed.html ?? "",
         labelIds: [...(message.flags ?? [])],
         headers,
+        attachments: [],
         unsubscribeLinks: [],
       };
     } catch (error) {
