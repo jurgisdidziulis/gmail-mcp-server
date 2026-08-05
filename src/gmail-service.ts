@@ -37,6 +37,10 @@ export interface AttachmentSummary {
   partId?: string;
 }
 
+interface PreservedAttachment extends AttachmentSummary {
+  data: string;
+}
+
 export interface UnsubscribeResult {
   success: boolean;
   method: "header-mailto" | "header-http" | "body-link" | "none";
@@ -49,6 +53,11 @@ export interface DraftResult {
   threadId?: string;
   replyMessageId?: string;
   threaded: boolean;
+  attachmentPreservation?: {
+    preserved: boolean;
+    count: number;
+    filenames: string[];
+  };
   threadVerification?: {
     method: "gmail.threads.get";
     expectedThreadId: string;
@@ -103,6 +112,67 @@ function buildPlainTextMessage(options: {
   headers.push("Content-Transfer-Encoding: 8bit");
 
   return [...headers, "", options.body].join("\r\n");
+}
+
+function quoteMimeValue(value: string): string {
+  return sanitizeHeader(value).replace(/["\\]/g, "\\$&");
+}
+
+function wrapBase64(value: string): string {
+  return value.replace(/.{1,76}/g, "$&\r\n").trimEnd();
+}
+
+function buildPlainTextMessageWithAttachments(options: {
+  to: string;
+  subject: string;
+  body: string;
+  inReplyTo?: string;
+  references?: string;
+  attachments: PreservedAttachment[];
+}): string {
+  const boundary = `office-draft-update-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
+  const headers = [
+    "MIME-Version: 1.0",
+    `To: ${sanitizeHeader(options.to)}`,
+    `Subject: ${encodeHeader(options.subject)}`,
+  ];
+
+  if (options.inReplyTo) {
+    headers.push(`In-Reply-To: ${sanitizeHeader(options.inReplyTo)}`);
+  }
+  if (options.references) {
+    headers.push(`References: ${sanitizeHeader(options.references)}`);
+  }
+
+  headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
+
+  const parts = [
+    ...headers,
+    "",
+    `--${boundary}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    options.body,
+  ];
+
+  for (const attachment of options.attachments) {
+    const filename = quoteMimeValue(attachment.filename || "attachment");
+    const mimeType = sanitizeHeader(attachment.mimeType || "application/octet-stream");
+    parts.push(
+      `--${boundary}`,
+      `Content-Type: ${mimeType}; name="${filename}"`,
+      "Content-Transfer-Encoding: base64",
+      `Content-Disposition: attachment; filename="${filename}"`,
+      "",
+      wrapBase64(attachment.data)
+    );
+  }
+
+  parts.push(`--${boundary}--`, "");
+  return parts.join("\r\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -545,7 +615,22 @@ export class GmailService {
       throw new Error("reply_message_id is required when thread_id is supplied.");
     }
 
-    const existingDraft = await this.getDraft(options.draftId);
+    const existingDraftRes = await this.gmail.users.drafts.get({
+      userId: "me",
+      id: options.draftId,
+      format: "full",
+    });
+    const existingDraftMessage = existingDraftRes.data.message;
+    if (!existingDraftMessage?.id) {
+      throw new Error(`Draft ${options.draftId} did not contain a Gmail message.`);
+    }
+    const existingDraft: DraftDetail = {
+      draftId: options.draftId,
+      ...this.emailDetailFromMessage(existingDraftMessage),
+    };
+    const preservedAttachments = await this.fetchPreservedAttachments(
+      existingDraftMessage
+    );
     const replyTo = options.replyMessageId
       ? await this.getEmail(options.replyMessageId)
       : null;
@@ -570,16 +655,25 @@ export class GmailService {
       ? [replyTo.headers.References, messageIdHeader].filter(Boolean).join(" ")
       : existingDraft.headers.References;
 
-    const raw = Buffer.from(
-      buildPlainTextMessage({
-        to,
-        subject,
-        body: options.body,
-        inReplyTo: messageIdHeader ?? existingDraft.headers["In-Reply-To"],
-        references: referencesHeader,
-      }),
-      "utf8"
-    ).toString("base64url");
+    const rawMessage =
+      preservedAttachments.length > 0
+        ? buildPlainTextMessageWithAttachments({
+            to,
+            subject,
+            body: options.body,
+            inReplyTo: messageIdHeader ?? existingDraft.headers["In-Reply-To"],
+            references: referencesHeader,
+            attachments: preservedAttachments,
+          })
+        : buildPlainTextMessage({
+            to,
+            subject,
+            body: options.body,
+            inReplyTo: messageIdHeader ?? existingDraft.headers["In-Reply-To"],
+            references: referencesHeader,
+          });
+
+    const raw = Buffer.from(rawMessage, "utf8").toString("base64url");
 
     const requestBody: gmail_v1.Schema$Draft = {
       id: options.draftId,
@@ -622,6 +716,11 @@ export class GmailService {
       threadId: returnedThreadId,
       replyMessageId: options.replyMessageId,
       threaded: Boolean(threadId),
+      attachmentPreservation: {
+        preserved: preservedAttachments.length > 0,
+        count: preservedAttachments.length,
+        filenames: preservedAttachments.map((attachment) => attachment.filename),
+      },
       threadVerification: verification,
     };
   }
@@ -778,6 +877,53 @@ export class GmailService {
       for (const child of part.parts ?? []) visit(child);
     };
     visit(payload);
+    return attachments;
+  }
+
+  private async fetchPreservedAttachments(
+    message: gmail_v1.Schema$Message
+  ): Promise<PreservedAttachment[]> {
+    if (!message.id || !message.payload) return [];
+    const attachments: PreservedAttachment[] = [];
+
+    const visit = async (part: gmail_v1.Schema$MessagePart): Promise<void> => {
+      const filename = part.filename ?? "";
+      const attachmentId = part.body?.attachmentId ?? undefined;
+      const inlineData = part.body?.data ?? undefined;
+
+      if (filename || attachmentId) {
+        let data = inlineData;
+        if (!data && attachmentId) {
+          const attachment = await this.gmail.users.messages.attachments.get({
+            userId: "me",
+            messageId: message.id!,
+            id: attachmentId,
+          });
+          data = attachment.data.data ?? undefined;
+        }
+
+        if (!data) {
+          throw new Error(
+            `Draft ${message.id} contains attachment ${filename || attachmentId} but Gmail did not return attachment data.`
+          );
+        }
+
+        attachments.push({
+          filename,
+          mimeType: part.mimeType ?? "application/octet-stream",
+          attachmentId,
+          size: part.body?.size ?? undefined,
+          partId: part.partId ?? undefined,
+          data: Buffer.from(data, "base64url").toString("base64"),
+        });
+      }
+
+      for (const child of part.parts ?? []) {
+        await visit(child);
+      }
+    };
+
+    await visit(message.payload);
     return attachments;
   }
 

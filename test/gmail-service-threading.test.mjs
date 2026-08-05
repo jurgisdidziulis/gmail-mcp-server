@@ -178,15 +178,31 @@ test("createDraft returns provider verification when draft is a thread member", 
 
 test("updateDraft updates in place and verifies provider thread membership", async () => {
   let updatedDraftId = "";
+  let updatedRaw = "";
   const service = serviceWithMock({
     users: {
       messages: {
         get: async () => replyMessage("thread-1"),
+        attachments: {
+          get: async ({ messageId, id }) => {
+            assert.equal(messageId, "draft-message-2");
+            assert.equal(id, "attachment-1");
+            return {
+              data: {
+                data: Buffer.from("%PDF- preserved attachment").toString("base64url"),
+              },
+            };
+          },
+        },
       },
       drafts: {
         get: async () => draftMessage("thread-1", "draft-message-2"),
-        update: async ({ id }) => {
+        update: async ({ id, requestBody }) => {
           updatedDraftId = id;
+          updatedRaw = Buffer.from(
+            requestBody.message.raw,
+            "base64url"
+          ).toString("utf8");
           return {
             data: {
               id,
@@ -215,6 +231,16 @@ test("updateDraft updates in place and verifies provider thread membership", asy
   assert.equal(updatedDraftId, "draft-1");
   assert.equal(result.draftId, "draft-1");
   assert.equal(result.threadVerification?.draftInThread, true);
+  assert.equal(result.attachmentPreservation?.preserved, true);
+  assert.equal(result.attachmentPreservation?.count, 1);
+  assert.deepEqual(result.attachmentPreservation?.filenames, ["invoice.pdf"]);
+  assert.match(updatedRaw, /Content-Type: multipart\/mixed/);
+  assert.match(updatedRaw, /Updated body/);
+  assert.match(updatedRaw, /Content-Disposition: attachment; filename="invoice.pdf"/);
+  assert.match(
+    updatedRaw,
+    new RegExp(Buffer.from("%PDF- preserved attachment").toString("base64"))
+  );
 });
 
 test("deleteDraft deletes only the exact draft ID", async () => {
