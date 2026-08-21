@@ -309,6 +309,36 @@ function createMcpServer(): McpServer {
     }
   );
 
+  // ---- create_label ----
+  server.tool(
+    "create_label",
+    "Create a Gmail user label if it does not already exist, then return authoritative label metadata. Does not apply the label to messages.",
+    {
+      account: z
+        .string()
+        .describe("Exact Gmail account address to modify"),
+      name: z.string().min(1).describe("User-label name to create if missing"),
+    },
+    async ({ account, name }) => {
+      const resolvedAccount = resolveSingleMailAccount(
+        account,
+        tokenStore.listAccounts(),
+        hostingerImapConfig
+      );
+      assertMailOperationAllowed(resolvedAccount, "create_label", hostingerImapConfig);
+      const gmail = await getGmailServiceForAccount(resolvedAccount);
+      const result = await gmail.createLabel(name);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ account: resolvedAccount, ...result }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
   // ---- list_labels ----
   server.tool(
     "list_labels",

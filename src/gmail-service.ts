@@ -355,6 +355,12 @@ export class GmailService {
   // label administration
   // -----------------------------------------------------------------------
 
+  async createLabel(labelName: string): Promise<{ success: boolean; label: GmailLabelSummary }> {
+    const labelId = await this.getOrCreateLabel(labelName);
+    const full = await this.gmail.users.labels.get({ userId: "me", id: labelId });
+    return { success: true, label: this.toLabelSummary(full.data) };
+  }
+
   async listLabels(): Promise<GmailLabelSummary[]> {
     const res = await this.gmail.users.labels.list({ userId: "me" });
     const labels = res.data.labels ?? [];
