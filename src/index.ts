@@ -309,6 +309,197 @@ function createMcpServer(): McpServer {
     }
   );
 
+  // ---- list_labels ----
+  server.tool(
+    "list_labels",
+    "List Gmail labels for one exact Gmail account, including stable label IDs, hierarchy names, visibility, and message/thread counts.",
+    {
+      account: z
+        .string()
+        .describe("Exact Gmail account address to inspect"),
+    },
+    async ({ account }) => {
+      const resolvedAccount = resolveSingleMailAccount(
+        account,
+        tokenStore.listAccounts(),
+        hostingerImapConfig
+      );
+      assertMailOperationAllowed(resolvedAccount, "list_labels", hostingerImapConfig);
+      const gmail = await getGmailServiceForAccount(resolvedAccount);
+      const labels = await gmail.listLabels();
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                account: resolvedAccount,
+                labels,
+                total: labels.length,
+                pagination_complete: true,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+
+  // ---- list_label_messages ----
+  server.tool(
+    "list_label_messages",
+    "List message IDs carrying one exact Gmail label ID for migration/read-back. Does not change mailbox state.",
+    {
+      account: z
+        .string()
+        .describe("Exact Gmail account address to inspect"),
+      label_id: z.string().describe("Stable Gmail label ID"),
+      max_results: z
+        .number()
+        .min(1)
+        .max(500)
+        .default(500)
+        .describe("Maximum messages to enumerate for this label"),
+    },
+    async ({ account, label_id, max_results }) => {
+      const resolvedAccount = resolveSingleMailAccount(
+        account,
+        tokenStore.listAccounts(),
+        hostingerImapConfig
+      );
+      assertMailOperationAllowed(resolvedAccount, "list_label_messages", hostingerImapConfig);
+      const gmail = await getGmailServiceForAccount(resolvedAccount);
+      const result = await gmail.listLabelMessages(label_id, max_results);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ account: resolvedAccount, ...result }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  // ---- migrate_label_messages ----
+  server.tool(
+    "migrate_label_messages",
+    "Apply a destination Gmail label to every enumerated message carrying a source label ID. Does not remove or delete messages.",
+    {
+      account: z
+        .string()
+        .describe("Exact Gmail account address to modify"),
+      source_label_id: z.string().describe("Stable source Gmail label ID"),
+      destination_label_name: z
+        .string()
+        .describe("Destination user-label name to create/apply before cleanup"),
+      max_results: z
+        .number()
+        .min(1)
+        .max(500)
+        .default(500)
+        .describe("Maximum messages to migrate in this bounded operation"),
+    },
+    async ({ account, source_label_id, destination_label_name, max_results }) => {
+      const resolvedAccount = resolveSingleMailAccount(
+        account,
+        tokenStore.listAccounts(),
+        hostingerImapConfig
+      );
+      assertMailOperationAllowed(resolvedAccount, "migrate_label_messages", hostingerImapConfig);
+      const gmail = await getGmailServiceForAccount(resolvedAccount);
+      const result = await gmail.migrateLabelMessages(
+        source_label_id,
+        destination_label_name,
+        max_results
+      );
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ account: resolvedAccount, ...result }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  // ---- update_label ----
+  server.tool(
+    "update_label",
+    "Patch one exact Gmail user label by stable ID. Supports rename and Gmail web label/message-list visibility fields.",
+    {
+      account: z
+        .string()
+        .describe("Exact Gmail account address to modify"),
+      label_id: z.string().describe("Stable Gmail label ID"),
+      name: z.string().optional().describe("Optional replacement label name"),
+      label_list_visibility: z
+        .enum(["labelShow", "labelShowIfUnread", "labelHide"])
+        .optional()
+        .describe("Optional Gmail web label-list visibility"),
+      message_list_visibility: z
+        .enum(["show", "hide"])
+        .optional()
+        .describe("Optional Gmail web message-list visibility"),
+    },
+    async ({ account, label_id, name, label_list_visibility, message_list_visibility }) => {
+      const resolvedAccount = resolveSingleMailAccount(
+        account,
+        tokenStore.listAccounts(),
+        hostingerImapConfig
+      );
+      assertMailOperationAllowed(resolvedAccount, "update_label", hostingerImapConfig);
+      const gmail = await getGmailServiceForAccount(resolvedAccount);
+      const result = await gmail.updateLabel({
+        labelId: label_id,
+        name,
+        labelListVisibility: label_list_visibility,
+        messageListVisibility: message_list_visibility,
+      });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ account: resolvedAccount, ...result }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  // ---- delete_label ----
+  server.tool(
+    "delete_label",
+    "Delete one exact Gmail user label by stable ID. Gmail removes the label from messages and threads but does not delete the messages.",
+    {
+      account: z
+        .string()
+        .describe("Exact Gmail account address to modify"),
+      label_id: z.string().describe("Stable Gmail user label ID to delete"),
+    },
+    async ({ account, label_id }) => {
+      const resolvedAccount = resolveSingleMailAccount(
+        account,
+        tokenStore.listAccounts(),
+        hostingerImapConfig
+      );
+      assertMailOperationAllowed(resolvedAccount, "delete_label", hostingerImapConfig);
+      const gmail = await getGmailServiceForAccount(resolvedAccount);
+      const result = await gmail.deleteLabel(label_id);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ account: resolvedAccount, ...result }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
   // ---- unsubscribe_email ----
   server.tool(
     "unsubscribe_email",

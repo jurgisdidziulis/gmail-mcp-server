@@ -72,6 +72,24 @@ export interface DraftDetail extends EmailDetail {
   threadVerification?: DraftResult["threadVerification"];
 }
 
+export interface GmailLabelSummary {
+  id: string;
+  name: string;
+  type: string;
+  messageListVisibility?: string;
+  labelListVisibility?: string;
+  messagesTotal?: number;
+  messagesUnread?: number;
+  threadsTotal?: number;
+  threadsUnread?: number;
+}
+
+export interface LabelMessageSummary {
+  id: string;
+  threadId: string;
+  labelIds: string[];
+}
+
 function sanitizeHeader(value: string): string {
   return value.replace(/[\r\n]+/g, " ").trim();
 }
@@ -331,6 +349,150 @@ export class GmailService {
       },
     });
     return created.data.id!;
+  }
+
+  // -----------------------------------------------------------------------
+  // label administration
+  // -----------------------------------------------------------------------
+
+  async listLabels(): Promise<GmailLabelSummary[]> {
+    const res = await this.gmail.users.labels.list({ userId: "me" });
+    const labels = res.data.labels ?? [];
+    const detailed = await Promise.all(
+      labels.map(async (label) => {
+        const id = label.id!;
+        try {
+          const full = await this.gmail.users.labels.get({ userId: "me", id });
+          return this.toLabelSummary(full.data);
+        } catch {
+          return this.toLabelSummary(label);
+        }
+      })
+    );
+    return detailed.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async listLabelMessages(
+    labelId: string,
+    maxResults: number = 500
+  ): Promise<{
+    labelId: string;
+    messages: LabelMessageSummary[];
+    paginationComplete: boolean;
+  }> {
+    const messages: LabelMessageSummary[] = [];
+    let pageToken: string | undefined;
+    const limit = Math.min(Math.max(maxResults, 1), 500);
+
+    while (messages.length < limit) {
+      const res = await this.gmail.users.messages.list({
+        userId: "me",
+        labelIds: [labelId],
+        maxResults: Math.min(100, limit - messages.length),
+        pageToken,
+      });
+      const ids = res.data.messages ?? [];
+      const page = await Promise.all(
+        ids.map(async (message) => {
+          const full = await this.gmail.users.messages.get({
+            userId: "me",
+            id: message.id!,
+            format: "metadata",
+          });
+          return {
+            id: full.data.id!,
+            threadId: full.data.threadId!,
+            labelIds: full.data.labelIds ?? [],
+          };
+        })
+      );
+      messages.push(...page);
+      pageToken = res.data.nextPageToken ?? undefined;
+      if (!pageToken || ids.length === 0) break;
+    }
+
+    return {
+      labelId,
+      messages,
+      paginationComplete: !pageToken,
+    };
+  }
+
+  async migrateLabelMessages(
+    labelId: string,
+    destinationLabelName: string,
+    maxResults: number = 500
+  ): Promise<{
+    success: boolean;
+    sourceLabelId: string;
+    destinationLabelId: string;
+    migratedMessageIds: string[];
+    paginationComplete: boolean;
+  }> {
+    const destinationLabelId = await this.getOrCreateLabel(destinationLabelName);
+    const listed = await this.listLabelMessages(labelId, maxResults);
+    const messageIds = listed.messages.map((message) => message.id);
+
+    for (let index = 0; index < messageIds.length; index += 100) {
+      const batch = messageIds.slice(index, index + 100);
+      if (batch.length === 0) continue;
+      await this.gmail.users.messages.batchModify({
+        userId: "me",
+        requestBody: {
+          ids: batch,
+          addLabelIds: [destinationLabelId],
+        },
+      });
+    }
+
+    return {
+      success: true,
+      sourceLabelId: labelId,
+      destinationLabelId,
+      migratedMessageIds: messageIds,
+      paginationComplete: listed.paginationComplete,
+    };
+  }
+
+  async updateLabel(options: {
+    labelId: string;
+    name?: string;
+    labelListVisibility?: string;
+    messageListVisibility?: string;
+  }): Promise<{ success: boolean; label: GmailLabelSummary }> {
+    const requestBody: gmail_v1.Schema$Label = {};
+    if (options.name) requestBody.name = options.name;
+    if (options.labelListVisibility) {
+      requestBody.labelListVisibility = options.labelListVisibility;
+    }
+    if (options.messageListVisibility) {
+      requestBody.messageListVisibility = options.messageListVisibility;
+    }
+    const res = await this.gmail.users.labels.patch({
+      userId: "me",
+      id: options.labelId,
+      requestBody,
+    });
+    return { success: true, label: this.toLabelSummary(res.data) };
+  }
+
+  async deleteLabel(labelId: string): Promise<{ success: boolean; labelId: string }> {
+    await this.gmail.users.labels.delete({ userId: "me", id: labelId });
+    return { success: true, labelId };
+  }
+
+  private toLabelSummary(label: gmail_v1.Schema$Label): GmailLabelSummary {
+    return {
+      id: label.id ?? "",
+      name: label.name ?? "",
+      type: label.type ?? "",
+      messageListVisibility: label.messageListVisibility ?? undefined,
+      labelListVisibility: label.labelListVisibility ?? undefined,
+      messagesTotal: label.messagesTotal ?? undefined,
+      messagesUnread: label.messagesUnread ?? undefined,
+      threadsTotal: label.threadsTotal ?? undefined,
+      threadsUnread: label.threadsUnread ?? undefined,
+    };
   }
 
   // -----------------------------------------------------------------------
