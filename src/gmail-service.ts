@@ -447,6 +447,7 @@ export class GmailService {
         requestBody: {
           ids: batch,
           addLabelIds: [destinationLabelId],
+          removeLabelIds: [labelId],
         },
       });
     }
