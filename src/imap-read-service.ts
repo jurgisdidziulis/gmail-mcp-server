@@ -278,7 +278,8 @@ export class ImapReadService {
 
   async listEmails(
     query?: string,
-    maxResults = 20
+    maxResults = 20,
+    _pageToken?: string
   ): Promise<EmailSummary[]> {
     const client = this.clientFactory({
       host: this.config.host,
@@ -428,7 +429,8 @@ export class ImapReadService {
     }
   }
 
-  async batchProcess(query: string, maxResults = 20): Promise<EmailSummary[]> {
+  async batchProcess(query: string, maxResults = 20, pageToken?: string): Promise<EmailSummary[]> {
+    void pageToken;
     return this.listEmails(query, maxResults);
   }
 }

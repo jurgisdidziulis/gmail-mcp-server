@@ -67,6 +67,51 @@ function draftMessage(threadId = "thread-1", id = "draft-message-1") {
   };
 }
 
+test("listEmails returns Gmail pagination metadata and accepts page tokens", async () => {
+  let observedList;
+  const service = serviceWithMock({
+    users: {
+      messages: {
+        list: async (request) => {
+          observedList = request;
+          return {
+            data: {
+              messages: [{ id: "message-1" }],
+              nextPageToken: "next-page-token",
+              resultSizeEstimate: 101,
+            },
+          };
+        },
+        get: async () => ({
+          data: {
+            id: "message-1",
+            threadId: "thread-1",
+            snippet: "Snippet",
+            labelIds: ["INBOX"],
+            payload: {
+              headers: [
+                { name: "Subject", value: "Subject" },
+                { name: "From", value: "Sender <sender@example.com>" },
+                { name: "Date", value: "Sat, 22 Aug 2026 19:00:00 +0000" },
+              ],
+            },
+          },
+        }),
+      },
+    },
+  });
+
+  const page = await service.listEmails("newer_than:30d", 100, "current-page-token");
+
+  assert.equal(observedList.q, "newer_than:30d");
+  assert.equal(observedList.maxResults, 100);
+  assert.equal(observedList.pageToken, "current-page-token");
+  assert.equal(page.emails.length, 1);
+  assert.equal(page.nextPageToken, "next-page-token");
+  assert.equal(page.resultSizeEstimate, 101);
+  assert.equal(page.paginationComplete, false);
+});
+
 test("createDraft rejects mismatched thread_id and reply_message_id before draft creation", async () => {
   let draftCreateCalls = 0;
   const service = serviceWithMock({

@@ -76,8 +76,21 @@ async function getGmailServiceForAccount(email: string): Promise<GmailService> {
 
 type ReadMailService = Pick<
   GmailService,
-  "listEmails" | "getEmail" | "batchProcess"
->;
+  "getEmail"
+> & {
+  listEmails(query?: string, maxResults?: number, pageToken?: string): Promise<any[] | {
+    emails: any[];
+    nextPageToken: string | null;
+    resultSizeEstimate: number | null;
+    paginationComplete: boolean;
+  }>;
+  batchProcess(query: string, maxResults?: number, pageToken?: string): Promise<any[] | {
+    emails: any[];
+    nextPageToken: string | null;
+    resultSizeEstimate: number | null;
+    paginationComplete: boolean;
+  }>;
+};
 
 async function getReadServiceForAccount(
   email: string
@@ -187,21 +200,48 @@ function createMcpServer(): McpServer {
         .max(100)
         .default(20)
         .describe("Maximum number of emails to return per account (1-100)"),
+      page_token: z
+        .string()
+        .optional()
+        .describe("Optional Gmail nextPageToken from a previous list_emails response."),
     },
-    async ({ account, query, max_results }) => {
+    async ({ account, query, max_results, page_token }) => {
       const accounts = resolveAccounts(account);
-      const allResults: Array<{ account: string; emails: any[] }> = [];
+      const allResults: Array<{
+        account: string;
+        emails: any[];
+        next_page_token: string | null;
+        pagination_complete: boolean;
+        result_size_estimate: number | null;
+      }> = [];
 
       for (const email of accounts) {
         try {
           const service = await getReadServiceForAccount(email);
-          const emails = await service.listEmails(query, max_results);
-          allResults.push({ account: email, emails });
+          const result = await service.listEmails(query, max_results, page_token);
+          const page = Array.isArray(result)
+            ? {
+                emails: result,
+                nextPageToken: null,
+                paginationComplete: true,
+                resultSizeEstimate: result.length,
+              }
+            : result;
+          allResults.push({
+            account: email,
+            emails: page.emails,
+            next_page_token: page.nextPageToken ?? null,
+            pagination_complete: page.paginationComplete,
+            result_size_estimate: page.resultSizeEstimate ?? null,
+          });
         } catch (err) {
           if (isHostingerAccount(email, hostingerImapConfig)) throw err;
           allResults.push({
             account: email,
             emails: [],
+            next_page_token: null,
+            pagination_complete: true,
+            result_size_estimate: null,
           });
         }
       }
@@ -610,19 +650,49 @@ function createMcpServer(): McpServer {
         .max(100)
         .default(20)
         .describe("Maximum number of emails to fetch per account"),
+      page_token: z
+        .string()
+        .optional()
+        .describe("Optional Gmail nextPageToken from a previous batch_process response."),
     },
-    async ({ account, query, max_results }) => {
+    async ({ account, query, max_results, page_token }) => {
       const accounts = resolveAccounts(account);
-      const allResults: Array<{ account: string; emails: any[] }> = [];
+      const allResults: Array<{
+        account: string;
+        emails: any[];
+        next_page_token: string | null;
+        pagination_complete: boolean;
+        result_size_estimate: number | null;
+      }> = [];
 
       for (const email of accounts) {
         try {
           const service = await getReadServiceForAccount(email);
-          const emails = await service.batchProcess(query, max_results);
-          allResults.push({ account: email, emails });
+          const result = await service.batchProcess(query, max_results, page_token);
+          const page = Array.isArray(result)
+            ? {
+                emails: result,
+                nextPageToken: null,
+                paginationComplete: true,
+                resultSizeEstimate: result.length,
+              }
+            : result;
+          allResults.push({
+            account: email,
+            emails: page.emails,
+            next_page_token: page.nextPageToken ?? null,
+            pagination_complete: page.paginationComplete,
+            result_size_estimate: page.resultSizeEstimate ?? null,
+          });
         } catch (err) {
           if (isHostingerAccount(email, hostingerImapConfig)) throw err;
-          allResults.push({ account: email, emails: [] });
+          allResults.push({
+            account: email,
+            emails: [],
+            next_page_token: null,
+            pagination_complete: true,
+            result_size_estimate: null,
+          });
         }
       }
 

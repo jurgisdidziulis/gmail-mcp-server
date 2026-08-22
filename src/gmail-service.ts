@@ -14,6 +14,13 @@ export interface EmailSummary {
   labelIds: string[];
 }
 
+export interface EmailListPage {
+  emails: EmailSummary[];
+  nextPageToken: string | null;
+  resultSizeEstimate: number | null;
+  paginationComplete: boolean;
+}
+
 export interface EmailDetail {
   id: string;
   threadId: string;
@@ -212,23 +219,37 @@ export class GmailService {
 
   async listEmails(
     query?: string,
-    maxResults: number = 20
-  ): Promise<EmailSummary[]> {
+    maxResults: number = 20,
+    pageToken?: string
+  ): Promise<EmailListPage> {
     const res = await this.gmail.users.messages.list({
       userId: "me",
       q: query || undefined,
       maxResults: Math.min(maxResults, 100),
+      pageToken: pageToken || undefined,
     });
 
     const messageIds = res.data.messages ?? [];
-    if (messageIds.length === 0) return [];
+    if (messageIds.length === 0) {
+      return {
+        emails: [],
+        nextPageToken: res.data.nextPageToken ?? null,
+        resultSizeEstimate: typeof res.data.resultSizeEstimate === "number" ? res.data.resultSizeEstimate : null,
+        paginationComplete: !res.data.nextPageToken,
+      };
+    }
 
     // Fetch headers for each message in parallel (batched)
     const summaries = await Promise.all(
       messageIds.map((m) => this.getEmailSummary(m.id!))
     );
 
-    return summaries;
+    return {
+      emails: summaries,
+      nextPageToken: res.data.nextPageToken ?? null,
+      resultSizeEstimate: typeof res.data.resultSizeEstimate === "number" ? res.data.resultSizeEstimate : null,
+      paginationComplete: !res.data.nextPageToken,
+    };
   }
 
   private async getEmailSummary(messageId: string): Promise<EmailSummary> {
@@ -1004,9 +1025,10 @@ export class GmailService {
 
   async batchProcess(
     query: string,
-    maxResults: number = 20
-  ): Promise<EmailSummary[]> {
-    return this.listEmails(query, maxResults);
+    maxResults: number = 20,
+    pageToken?: string
+  ): Promise<EmailListPage> {
+    return this.listEmails(query, maxResults, pageToken);
   }
 
   // -----------------------------------------------------------------------
