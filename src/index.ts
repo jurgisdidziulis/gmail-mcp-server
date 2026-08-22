@@ -309,6 +309,38 @@ function createMcpServer(): McpServer {
     }
   );
 
+  // ---- remove_label ----
+  server.tool(
+    "remove_label",
+    "Remove a Gmail label from an email. The label itself is not deleted.",
+    {
+      account: z
+        .string()
+        .describe("Email address of the account this message belongs to"),
+      message_id: z.string().describe("The Gmail message ID"),
+      label_name: z
+        .string()
+        .describe("Label name to remove from the message"),
+    },
+    async ({ account, message_id, label_name }) => {
+      assertMailOperationAllowed(account, "remove_label", hostingerImapConfig);
+      const gmail = await getGmailServiceForAccount(account);
+      const result = await gmail.removeLabel(message_id, label_name);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              account,
+              ...result,
+              message: `Label "${label_name}" removed from email ${message_id}.`,
+            }),
+          },
+        ],
+      };
+    }
+  );
+
   // ---- create_label ----
   server.tool(
     "create_label",

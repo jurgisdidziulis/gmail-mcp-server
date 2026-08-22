@@ -74,6 +74,7 @@ test("Hostinger mutating operations are blocked before IMAP access", () => {
   for (const operation of [
     "archive_email",
     "apply_label",
+    "remove_label",
     "list_labels",
     "list_label_messages",
     "migrate_label_messages",

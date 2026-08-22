@@ -66,6 +66,7 @@ This Gmail MCP server turns any MCP-compatible AI client into a full-featured em
 | `get_email` | Get full email content and headers from the selected provider |
 | `archive_email` | Archive a Gmail email; disabled for Hostinger |
 | `apply_label` | Apply a Gmail label; disabled for Hostinger |
+| `remove_label` | Remove a Gmail label from an email; disabled for Hostinger |
 | `unsubscribe_email` | Gmail-only unsubscribe workflow; disabled for Hostinger |
 | `batch_process` | Fetch a read-only batch for triage. Query Hostinger by its exact address |
 | `create_draft` | Create a Gmail draft; disabled for Hostinger |
@@ -303,7 +304,7 @@ Want to help make this better? Here are some open ideas:
 - [ ] Add email attachment download support
 - [ ] Add `delete_email` tool
 - [ ] Add `mark_as_read` / `mark_as_unread` tools
-- [ ] Add `remove_label` tool
+- [x] Add `remove_label` tool
 - [ ] Add support for Google Workspace accounts
 
 PRs are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.

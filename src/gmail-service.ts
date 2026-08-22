@@ -331,6 +331,23 @@ export class GmailService {
     return { success: true, labelId };
   }
 
+  async removeLabel(
+    messageId: string,
+    labelName: string
+  ): Promise<{ success: boolean; labelId: string }> {
+    const labelId = await this.getOrCreateLabel(labelName);
+
+    await this.gmail.users.messages.modify({
+      userId: "me",
+      id: messageId,
+      requestBody: {
+        removeLabelIds: [labelId],
+      },
+    });
+
+    return { success: true, labelId };
+  }
+
   private async getOrCreateLabel(labelName: string): Promise<string> {
     // Check existing labels
     const res = await this.gmail.users.labels.list({ userId: "me" });
