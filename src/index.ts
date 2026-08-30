@@ -286,6 +286,39 @@ function createMcpServer(): McpServer {
     }
   );
 
+  // ---- get_thread_evidence ----
+  server.tool(
+    "get_thread_evidence",
+    "Read a complete Gmail thread around an anchor message, enumerate attachments, and extract bounded PDF text without changing mailbox state.",
+    {
+      account: z
+        .string()
+        .describe("Gmail address of the account this message belongs to"),
+      message_id: z.string().regex(/^[A-Za-z0-9_-]{8,256}$/),
+      max_pdf_pages: z.number().int().min(1).max(200).default(50),
+    },
+    async ({ account, message_id, max_pdf_pages }) => {
+      const resolvedAccount = resolveSingleMailAccount(
+        account,
+        tokenStore.listAccounts(),
+        hostingerImapConfig
+      );
+      if (isHostingerAccount(resolvedAccount, hostingerImapConfig)) {
+        throw new Error("Complete thread evidence is available only for Gmail accounts");
+      }
+      const gmail = await getGmailServiceForAccount(resolvedAccount);
+      const evidence = await gmail.getThreadEvidence(message_id, max_pdf_pages);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ ...evidence, account: resolvedAccount }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
   // ---- archive_email ----
   server.tool(
     "archive_email",

@@ -64,6 +64,7 @@ This Gmail MCP server turns any MCP-compatible AI client into a full-featured em
 | `check_hostinger_connection` | Verify Hostinger INBOX metadata over read-only IMAP without fetching messages |
 | `list_emails` | Search and list emails. `account="all"` intentionally targets Gmail accounts only |
 | `get_email` | Get full email content and headers from the selected provider |
+| `get_thread_evidence` | Read a complete Gmail thread, enumerate attachments, and extract bounded PDF text |
 | `archive_email` | Archive a Gmail email; disabled for Hostinger |
 | `apply_label` | Apply a Gmail label; disabled for Hostinger |
 | `remove_label` | Remove a Gmail label from an email; disabled for Hostinger |
