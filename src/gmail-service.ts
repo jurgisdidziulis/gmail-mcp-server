@@ -1,4 +1,5 @@
 import { google, gmail_v1 } from "googleapis";
+import { PDFParse } from "pdf-parse";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,6 +36,48 @@ export interface AttachmentSummary {
   attachmentId?: string;
   size?: number;
   partId?: string;
+}
+
+export interface ThreadEvidence {
+  capability: "mail.evidence.read";
+  contract_version: "1.0.0";
+  success: boolean;
+  status: "complete" | "incomplete_stop";
+  account?: string;
+  anchor_message_id: string;
+  thread_id: string | null;
+  message_count: number;
+  messages: EmailDetail[];
+  attachment_count: number;
+  attachments: EvidenceAttachment[];
+  pdf_count: number;
+  pdfs: EvidencePdf[];
+  completeness: {
+    anchor_message_complete: boolean;
+    thread_complete: boolean;
+    attachments_enumerated: boolean;
+    pdf_extraction_complete: boolean;
+    reply_context_complete: boolean;
+  };
+  failures: string[];
+}
+
+export interface EvidenceAttachment {
+  source_message_id: string;
+  field: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number | null;
+  is_pdf: boolean;
+  attachment_id?: string;
+}
+
+export interface EvidencePdf extends EvidenceAttachment {
+  status: "complete" | "needs_ocr" | "password_required" | "failed";
+  text: string;
+  text_character_count: number;
+  page_count: number | null;
+  error: string | null;
 }
 
 interface PreservedAttachment extends AttachmentSummary {
@@ -248,32 +291,73 @@ export class GmailService {
       format: "full",
     });
 
-    const headers = res.data.payload?.headers ?? [];
-    const hdr = (name: string) =>
-      headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())
-        ?.value ?? "";
+    return this.emailDetailFromMessage(res.data);
+  }
 
-    const headersMap: Record<string, string> = {};
-    for (const h of headers) {
-      if (h.name && h.value) headersMap[h.name] = h.value;
+  async getThreadEvidence(
+    anchorMessageId: string,
+    maxPdfPages: number = 50
+  ): Promise<ThreadEvidence> {
+    const anchor = await this.gmail.users.messages.get({
+      userId: "me",
+      id: anchorMessageId,
+      format: "metadata",
+    });
+    const threadId = anchor.data.threadId;
+    if (!threadId) {
+      throw new Error(`Gmail message ${anchorMessageId} omitted threadId`);
     }
 
-    const body = this.extractBody(res.data.payload ?? {});
-    const unsubscribeLinks = this.parseUnsubscribeLinks(headersMap, body);
+    const thread = await this.gmail.users.threads.get({
+      userId: "me",
+      id: threadId,
+      format: "full",
+    });
+    const rawMessages = thread.data.messages ?? [];
+    const messages = rawMessages.map((message) => this.emailDetailFromMessage(message));
+    const attachments = rawMessages.flatMap((message) =>
+      this.evidenceAttachmentsFromMessage(message)
+    );
+    const pdfs: EvidencePdf[] = [];
+
+    for (const attachment of attachments.filter((item) => item.is_pdf)) {
+      pdfs.push(await this.extractEvidencePdf(attachment, maxPdfPages));
+    }
+
+    const threadIds = new Set(messages.map((message) => message.threadId));
+    const completeness = {
+      anchor_message_complete: messages.some((message) => message.id === anchorMessageId),
+      thread_complete:
+        messages.length === rawMessages.length &&
+        messages.length > 0 &&
+        threadIds.size === 1 &&
+        threadIds.has(threadId),
+      attachments_enumerated: true,
+      pdf_extraction_complete: pdfs.every((pdf) => pdf.status === "complete"),
+      reply_context_complete: messages.some(
+        (message) => message.id === anchorMessageId && message.threadId === threadId
+      ),
+    };
+    const failures = Object.entries(completeness)
+      .filter(([, complete]) => !complete)
+      .map(([name]) => name);
+    const success = failures.length === 0;
 
     return {
-      id: res.data.id!,
-      threadId: res.data.threadId!,
-      subject: hdr("Subject"),
-      from: hdr("From"),
-      to: hdr("To"),
-      date: hdr("Date"),
-      snippet: res.data.snippet ?? "",
-      body,
-      labelIds: res.data.labelIds ?? [],
-      headers: headersMap,
-      attachments: this.extractAttachments(res.data.payload),
-      unsubscribeLinks,
+      capability: "mail.evidence.read",
+      contract_version: "1.0.0",
+      success,
+      status: success ? "complete" : "incomplete_stop",
+      anchor_message_id: anchorMessageId,
+      thread_id: threadIds.size === 1 ? threadId : null,
+      message_count: messages.length,
+      messages,
+      attachment_count: attachments.length,
+      attachments,
+      pdf_count: pdfs.length,
+      pdfs,
+      completeness,
+      failures,
     };
   }
 
@@ -878,6 +962,86 @@ export class GmailService {
     };
     visit(payload);
     return attachments;
+  }
+
+  private evidenceAttachmentsFromMessage(
+    message: gmail_v1.Schema$Message
+  ): EvidenceAttachment[] {
+    if (!message.id || !message.payload) return [];
+    const attachments: EvidenceAttachment[] = [];
+    const visit = (part: gmail_v1.Schema$MessagePart) => {
+      const filename = part.filename ?? "";
+      const attachmentId = part.body?.attachmentId ?? undefined;
+      if (filename || attachmentId) {
+        const mimeType = part.mimeType ?? "application/octet-stream";
+        attachments.push({
+          source_message_id: message.id!,
+          field: part.partId ?? attachmentId ?? filename,
+          filename: filename || attachmentId || "attachment",
+          mime_type: mimeType,
+          size_bytes: part.body?.size ?? null,
+          is_pdf:
+            mimeType.toLowerCase() === "application/pdf" ||
+            filename.toLowerCase().endsWith(".pdf"),
+          attachment_id: attachmentId,
+        });
+      }
+      for (const child of part.parts ?? []) visit(child);
+    };
+    visit(message.payload);
+    return attachments;
+  }
+
+  private async extractEvidencePdf(
+    attachment: EvidenceAttachment,
+    maxPdfPages: number
+  ): Promise<EvidencePdf> {
+    const base = {
+      ...attachment,
+      text: "",
+      text_character_count: 0,
+      page_count: null as number | null,
+      error: null as string | null,
+    };
+    if (!attachment.attachment_id) {
+      return { ...base, status: "failed", error: "Gmail omitted attachment data id" };
+    }
+
+    let parser: PDFParse | null = null;
+    try {
+      const response = await this.gmail.users.messages.attachments.get({
+        userId: "me",
+        messageId: attachment.source_message_id,
+        id: attachment.attachment_id,
+      });
+      if (!response.data.data) {
+        throw new Error("Gmail omitted PDF attachment data");
+      }
+      const bytes = Buffer.from(response.data.data, "base64url");
+      const maxBytes = Number(process.env.MAIL_EVIDENCE_MAX_PDF_BYTES ?? 20 * 1024 * 1024);
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || bytes.length > maxBytes) {
+        throw new Error(`PDF exceeds the configured ${maxBytes}-byte evidence limit`);
+      }
+      parser = new PDFParse({ data: bytes });
+      const result = await parser.getText({ first: maxPdfPages });
+      const text = result.text ?? "";
+      return {
+        ...base,
+        status: text.trim() ? "complete" : "needs_ocr",
+        text,
+        text_character_count: text.length,
+        page_count: result.total || null,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ...base,
+        status: /password|encrypted/i.test(message) ? "password_required" : "failed",
+        error: message,
+      };
+    } finally {
+      await parser?.destroy().catch(() => undefined);
+    }
   }
 
   private async fetchPreservedAttachments(
