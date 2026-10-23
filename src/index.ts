@@ -416,12 +416,13 @@ function createMcpServer(): McpServer {
     {
       account: z.string().describe("Email address of the account this message belongs to"),
       message_id: z.string().describe("The Gmail message ID"),
+      expected_label_id: z.string().min(1).optional(),
       label_name: z.string().describe("Label name to remove"),
     },
-    async ({ account, message_id, label_name }) => {
+    async ({ account, message_id, label_name, expected_label_id }) => {
       assertMailOperationAllowed(account, "remove_label", hostingerImapConfig);
       const gmail = await getGmailServiceForAccount(account);
-      const result = await gmail.removeLabel(message_id, label_name);
+      const result = await gmail.removeLabel(message_id, label_name, expected_label_id);
       return { content: [{ type: "text" as const, text: JSON.stringify({ account, ...result }) }] };
     }
   );
@@ -617,16 +618,17 @@ function createMcpServer(): McpServer {
         .string()
         .describe("Email address of the account this message belongs to"),
       message_id: z.string().describe("The Gmail message ID"),
+      expected_label_id: z.string().min(1).optional(),
       label_name: z
         .string()
         .describe(
           "Label name to apply (e.g. 'Receipts', 'Follow Up'). Created automatically if it does not exist."
         ),
     },
-    async ({ account, message_id, label_name }) => {
+    async ({ account, message_id, label_name, expected_label_id }) => {
       assertMailOperationAllowed(account, "apply_label", hostingerImapConfig);
       const gmail = await getGmailServiceForAccount(account);
-      const result = await gmail.applyLabel(message_id, label_name);
+      const result = await gmail.applyLabel(message_id, label_name, expected_label_id);
       return {
         content: [
           {

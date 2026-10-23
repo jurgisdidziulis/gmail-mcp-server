@@ -706,9 +706,11 @@ export class GmailService {
 
   async applyLabel(
     messageId: string,
-    labelName: string
+    labelName: string,
+    expectedLabelId?: string
   ): Promise<{ success: boolean; labelId: string }> {
-    const labelId = await this.getOrCreateLabel(labelName);
+    const labelId = expectedLabelId === undefined ? await this.getOrCreateLabel(labelName)
+      : await this.exactExistingLabelId(labelName, expectedLabelId);
 
     await this.gmail.users.messages.modify({
       userId: "me",
@@ -719,6 +721,16 @@ export class GmailService {
     });
 
     return { success: true, labelId };
+  }
+
+  private async exactExistingLabelId(name: string, expectedId: string): Promise<string> {
+    if (!expectedId || !name) throw new Error("Exact existing label binding required");
+    const res = await this.gmail.users.labels.list({userId:"me"});
+    const labels = res.data.labels;
+    if (!Array.isArray(labels)) throw new Error("Provider label inventory unavailable");
+    const matches = labels.filter(l=>l.name === name);
+    if (matches.length !== 1 || matches[0].id !== expectedId || labels.filter(l=>l.id === expectedId).length !== 1) throw new Error("Approved label ID/name binding changed");
+    return expectedId;
   }
 
   private async getOrCreateLabel(labelName: string): Promise<string> {
@@ -745,7 +757,12 @@ export class GmailService {
   // remove_label — remove a label from a message
   // -----------------------------------------------------------------------
 
-  async removeLabel(messageId: string, labelName: string): Promise<{ success: boolean }> {
+  async removeLabel(messageId: string, labelName: string, expectedLabelId?: string): Promise<{ success: boolean; labelId?: string }> {
+    if (expectedLabelId !== undefined) {
+      const id = await this.exactExistingLabelId(labelName,expectedLabelId);
+      await this.gmail.users.messages.modify({userId:"me",id:messageId,requestBody:{removeLabelIds:[id]}});
+      return {success:true,labelId:id};
+    }
     const res = await this.gmail.users.labels.list({ userId: "me" });
     const label = (res.data.labels ?? []).find(
       (l) => l.name?.toLowerCase() === labelName.toLowerCase()
