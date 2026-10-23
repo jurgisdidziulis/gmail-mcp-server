@@ -1,3 +1,4 @@
+import { readThreadEvidence } from "./thread-evidence.js";
 import { createAdminSecurity, escapeHtml } from "./admin-security.js";
 import { verifySendProof, type SendBinding } from './delegated-send.js';
 import express, { Request, Response, NextFunction } from "express";
@@ -401,70 +402,8 @@ function createMcpServer(): McpServer {
         hostingerImapConfig
       );
       const service = await getReadServiceForAccount(resolvedAccount);
-      const anchor = await service.getEmail(message_id);
-      if (anchor.id !== message_id || !anchor.threadId) {
-        throw new Error("Anchor message identity did not match the routed message");
-      }
-      const threadId = anchor.threadId;
-      const allMessages: any[] = [];
-      let pageToken: string | undefined;
-      let threadComplete = false;
-      while (!threadComplete) {
-        const page = await service.getThread(threadId, 100, pageToken);
-        allMessages.push(...page.messages);
-        threadComplete = page.threadComplete;
-        pageToken = page.nextPageToken ?? undefined;
-        if (!threadComplete && !pageToken) {
-          throw new Error("Thread pagination was incomplete: missing next page token");
-        }
-      }
-      const attachments: any[] = [];
-      for (const m of allMessages) {
-        for (const a of m.attachments ?? []) {
-          const isPdf =
-            String(a.mime_type || "").toLowerCase() === "application/pdf" ||
-            String(a.filename || "").toLowerCase().endsWith(".pdf");
-          attachments.push({
-            source_message_id: m.id,
-            filename: a.filename,
-            mime_type: a.mime_type,
-            is_pdf: isPdf,
-          });
-        }
-      }
-      const pdfs = attachments
-        .filter((a) => a.is_pdf)
-        .map((a) => ({
-          source_message_id: a.source_message_id,
-          filename: a.filename,
-          mime_type: a.mime_type,
-          is_pdf: true,
-          status: "complete",
-          error: null,
-        }));
-      const evidence = {
-        capability: "mail.evidence.read",
-        contract_version: "1.0.0",
-        success: true,
-        status: "complete",
-        account: resolvedAccount,
-        anchor_message_id: message_id,
-        thread_id: threadId,
-        message_count: allMessages.length,
-        messages: allMessages,
-        attachment_count: attachments.length,
-        attachments,
-        pdf_count: pdfs.length,
-        pdfs,
-        completeness: {
-          anchor_message_complete: "complete",
-          thread_complete: "complete",
-          attachments_enumerated: "complete",
-          pdf_extraction_complete: "complete",
-          reply_context_complete: "complete",
-        },
-        failures: [],
-      };
+      const evidence = await readThreadEvidence(service, resolvedAccount, message_id,
+        isHostingerAccount(resolvedAccount, hostingerImapConfig) ? "hostinger-imap" : "gmail");
       return {
         content: [{ type: "text" as const, text: JSON.stringify(evidence, null, 2) }],
       };
