@@ -25,10 +25,27 @@ export function reconcileOriginalBom(payload: any, encodedRaw: string): any {
     const contentType = headers.get('content-type') ?? 'text/plain';
     const mime = contentType.split(';')[0].trim().toLowerCase();
     if (mime !== String(part.mimeType).toLowerCase()) fail();
-    const disposition = headers.get('content-disposition') ?? '';
-    const blocked = ancestorBlocked || Boolean(part.filename) || mime === 'message/rfc822' ||
-      /(?:^|;)\s*(?:name|filename)(?:\*[\d*]*)?\s*=/i.test(contentType + ';' + disposition) ||
-      (Boolean(disposition) && !/^inline\s*(?:;|$)/i.test(disposition.trim()));
+    const structured = new Map<string, string>();
+    if (!Array.isArray(part.headers ?? [])) fail();
+    for (const h of part.headers ?? []) {
+      if (typeof h?.name !== 'string' || typeof h.value !== 'string' || /[\r\n]/.test(h.name + h.value)) fail();
+      const name = h.name.toLowerCase();
+      if (['content-type', 'content-disposition'].includes(name)) {
+        if (structured.has(name)) fail();
+        structured.set(name, h.value);
+      }
+    }
+    const fenced = (type: string, disposition: string): boolean => {
+      if (/[()]/.test(type + disposition)) fail();
+      const token = disposition ? /^\s*([A-Za-z0-9!#$%&'*+.^_`|~-]+)\s*(?:;|$)/.exec(disposition) : null;
+      if (disposition && !token) fail();
+      return /(?:^|;)\s*(?:name|filename)(?:\*[\d*]*)?\s*=/i.test(type + ';' + disposition) ||
+        Boolean(token && token[1].toLowerCase() !== 'inline');
+    };
+    const rawFence = fenced(contentType, headers.get('content-disposition') ?? '');
+    const structuredFence = Boolean(part.filename) || fenced(structured.get('content-type') ?? '', structured.get('content-disposition') ?? '');
+    if (rawFence !== structuredFence) fail();
+    const blocked = ancestorBlocked || rawFence || structuredFence || mime === 'message/rfc822';
     if (blocked) return part; // Do not decode, hash or traverse attachment bytes.
     const body = source.slice(split + 4);
     const parts = part.parts ?? [];
