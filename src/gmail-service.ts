@@ -1,4 +1,5 @@
 import { readAdminThreadShadow, stripAttachments } from "./admin-shadow.js";
+import { reconcileOriginalBom } from './gmail-bom-evidence.js';
 import { inspectSendRaw } from './delegated-send.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
@@ -437,7 +438,22 @@ export class GmailService {
       throw new Error("Gmail message identity did not match the requested message");
     }
 
-    const safePayload = stripAttachments(res.data.payload);
+    let safePayload: gmail_v1.Schema$MessagePart;
+    try {
+      safePayload = stripAttachments(res.data.payload);
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== 'Admin shadow: incomplete/noncanonical body') throw error;
+      // Never tolerate arbitrary size discrepancies. Prove the single observed
+      // provider transformation against the same original message/history.
+      if (!this.expectedAccount || !res.data.historyId) throw error;
+      const profile = await this.gmail.users.getProfile({ userId: 'me' });
+      if (profile.data.emailAddress?.toLowerCase() !== this.expectedAccount.toLowerCase()) throw error;
+      const original = await this.gmail.users.messages.get({ userId: 'me', id: messageId, format: 'raw' },
+        { timeout: 15000, maxContentLength: 8 * 1024 * 1024 });
+      if (original.data.id !== messageId || original.data.threadId !== res.data.threadId ||
+        original.data.historyId !== res.data.historyId || typeof original.data.raw !== 'string') throw error;
+      safePayload = stripAttachments(reconcileOriginalBom(res.data.payload, original.data.raw));
+    }
     const headers: gmail_v1.Schema$MessagePartHeader[] = safePayload.headers ?? [];
     for (const name of ["from", "subject", "date", "message-id"]) {
       if (headers.filter((h) => h.name?.toLowerCase() === name).length > 1) {
