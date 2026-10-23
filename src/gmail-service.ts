@@ -1,3 +1,9 @@
+import { readAdminThreadShadow, stripAttachments } from "./admin-shadow.js";
+import { inspectSendRaw } from './delegated-send.js';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { chmodSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, parse, resolve } from "node:path";
 import { google, gmail_v1 } from "googleapis";
 
 // ---------------------------------------------------------------------------
@@ -14,11 +20,181 @@ export interface EmailSummary {
   labelIds: string[];
 }
 
-export interface EmailListPage {
+export interface EmailPage {
   emails: EmailSummary[];
   nextPageToken: string | null;
-  resultSizeEstimate: number | null;
   paginationComplete: boolean;
+}
+
+export interface ThreadPage {
+  account: string | null;
+  provider: "gmail" | "hostinger-imap";
+  threadId: string;
+  messages: EmailDetail[];
+  nextPageToken: string | null;
+  threadComplete: boolean;
+  attachmentComplete: boolean;
+}
+
+interface ThreadPageToken {
+  version: 2;
+  provider: "gmail";
+  account_binding: string;
+  thread_id: string;
+  offset: number;
+  bounds_hash: string;
+  traversal: string;
+  signature: string;
+}
+
+interface ListPageToken {
+  version: 2;
+  provider: "gmail";
+  account_binding: string;
+  query: string;
+  max_results: number;
+  provider_page_token: string;
+  nonce: string;
+  signature: string;
+}
+
+function replayStoreRoot(): string {
+  const configured = process.env.GMAIL_THREAD_TOKEN_REPLAY_DIR?.trim();
+  return resolve(configured || join(homedir(), ".local", "state", "gmail-mcp-server", "thread-token-replay"));
+}
+
+function ensurePrivateReplayStore(root: string): void {
+  if (!isAbsolute(root)) throw new Error("Gmail thread replay store must be absolute");
+  const rootPrefix = parse(root).root;
+  let current = rootPrefix;
+  for (const part of root.slice(rootPrefix.length).split(/[\\/]+/).filter(Boolean)) {
+    current = join(current, part);
+    try {
+      const metadata = lstatSync(current);
+      if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+        throw new Error("Gmail thread replay store path is unsafe");
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      mkdirSync(current, { mode: 0o700 });
+    }
+  }
+  chmodSync(root, 0o700);
+}
+
+export function claimPageTokenReplay(token: string, context: string): void {
+  const root = replayStoreRoot();
+  ensurePrivateReplayStore(root);
+  const marker = join(root, createHash("sha256").update(token).digest("hex"));
+  try {
+    writeFileSync(marker, "consumed\n", { encoding: "utf8", flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error(`Gmail ${context} page token replay rejected`);
+    }
+    throw new Error(`Gmail ${context} page token replay state unavailable`);
+  }
+}
+
+function threadBoundsHash(messageIds: string[]): string {
+  return createHash("sha256").update(JSON.stringify(messageIds)).digest("hex");
+}
+
+type UnsignedThreadPageToken = Omit<ThreadPageToken, "signature">;
+
+function signThreadPageToken(value: UnsignedThreadPageToken, key: string): string {
+  return createHmac("sha256", key).update(JSON.stringify(value)).digest("base64url");
+}
+
+function encodeThreadPageToken(value: UnsignedThreadPageToken, key: string): string {
+  const signed: ThreadPageToken = {
+    ...value,
+    signature: signThreadPageToken(value, key),
+  };
+  return Buffer.from(JSON.stringify(signed), "utf8").toString("base64url");
+}
+
+function decodeThreadPageToken(
+  token: string,
+  key: string,
+  accountBinding: string
+): ThreadPageToken {
+  try {
+    const decoded = Buffer.from(token, "base64url").toString("utf8");
+    if (Buffer.from(decoded, "utf8").toString("base64url") !== token) {
+      throw new Error("non-canonical");
+    }
+    const value = JSON.parse(decoded) as Partial<ThreadPageToken>;
+    if (
+      value.version !== 2 ||
+      value.provider !== "gmail" ||
+      value.account_binding !== accountBinding ||
+      typeof value.thread_id !== "string" || !value.thread_id ||
+      !Number.isSafeInteger(value.offset) || Number(value.offset) < 1 ||
+      typeof value.bounds_hash !== "string" || !/^[0-9a-f]{64}$/.test(value.bounds_hash) ||
+      typeof value.traversal !== "string" || !/^[A-Za-z0-9_-]{22}$/.test(value.traversal) ||
+      typeof value.signature !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value.signature) ||
+      Object.keys(value).sort().join(",") !==
+        "account_binding,bounds_hash,offset,provider,signature,thread_id,traversal,version"
+    ) {
+      throw new Error("shape");
+    }
+    const { signature, ...unsigned } = value as ThreadPageToken;
+    const expected = signThreadPageToken(unsigned, key);
+    const providedBytes = Buffer.from(signature, "base64url");
+    const expectedBytes = Buffer.from(expected, "base64url");
+    if (
+      providedBytes.length !== expectedBytes.length ||
+      !timingSafeEqual(providedBytes, expectedBytes)
+    ) {
+      throw new Error("signature");
+    }
+    return value as ThreadPageToken;
+  } catch {
+    throw new Error("Invalid Gmail thread page token");
+  }
+}
+
+type UnsignedListPageToken = Omit<ListPageToken, "signature">;
+
+function signListPageToken(value: UnsignedListPageToken, key: string): string {
+  return createHmac("sha256", key).update(JSON.stringify(value)).digest("base64url");
+}
+
+function encodeListPageToken(value: Omit<ListPageToken, "signature" | "nonce">, key: string): string {
+  const unsigned: UnsignedListPageToken = {
+    ...value,
+    nonce: randomBytes(16).toString("hex"),
+  };
+  return Buffer.from(JSON.stringify({
+    ...unsigned,
+    signature: signListPageToken(unsigned, key),
+  }), "utf8").toString("base64url");
+}
+
+function decodeListPageToken(token: string, key: string, accountBinding: string): ListPageToken {
+  try {
+    const decoded = Buffer.from(token, "base64url").toString("utf8");
+    if (Buffer.from(decoded, "utf8").toString("base64url") !== token) throw new Error("non-canonical");
+    const value = JSON.parse(decoded) as Partial<ListPageToken>;
+    if (
+      value.version !== 2 || value.provider !== "gmail" || value.account_binding !== accountBinding ||
+      typeof value.query !== "string" ||
+      !Number.isSafeInteger(value.max_results) || Number(value.max_results) < 1 || Number(value.max_results) > 500 ||
+      typeof value.provider_page_token !== "string" || !value.provider_page_token ||
+      typeof value.nonce !== "string" || !/^[0-9a-f]{32}$/.test(value.nonce) ||
+      typeof value.signature !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value.signature) ||
+      Object.keys(value).sort().join(",") !==
+        "account_binding,max_results,nonce,provider,provider_page_token,query,signature,version"
+    ) throw new Error("shape");
+    const { signature, ...unsigned } = value as ListPageToken;
+    const expected = Buffer.from(signListPageToken(unsigned, key), "base64url");
+    const provided = Buffer.from(signature, "base64url");
+    if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) throw new Error("signature");
+    return value as ListPageToken;
+  } catch {
+    throw new Error("Invalid Gmail list page token");
+  }
 }
 
 export interface EmailDetail {
@@ -32,69 +208,19 @@ export interface EmailDetail {
   body: string;
   labelIds: string[];
   headers: Record<string, string>;
-  attachments: AttachmentSummary[];
   unsubscribeLinks: string[];
-}
-
-export interface AttachmentSummary {
-  filename: string;
-  mimeType: string;
-  attachmentId?: string;
-  size?: number;
-  partId?: string;
-}
-
-interface PreservedAttachment extends AttachmentSummary {
-  data: string;
+  attachments: Array<{
+    filename: string;
+    mime_type: string;
+    size: number;
+    attachment_id: string | null;
+  }>;
 }
 
 export interface UnsubscribeResult {
   success: boolean;
   method: "header-mailto" | "header-http" | "body-link" | "none";
   detail: string;
-}
-
-export interface DraftResult {
-  draftId: string;
-  messageId?: string;
-  threadId?: string;
-  replyMessageId?: string;
-  threaded: boolean;
-  attachmentPreservation?: {
-    preserved: boolean;
-    count: number;
-    filenames: string[];
-  };
-  threadVerification?: {
-    method: "gmail.threads.get";
-    expectedThreadId: string;
-    draftMessageId?: string;
-    memberMessageIds: string[];
-    draftInThread: boolean;
-  };
-}
-
-export interface DraftDetail extends EmailDetail {
-  draftId: string;
-  threadVerification?: DraftResult["threadVerification"];
-}
-
-export interface GmailLabelSummary {
-  id: string;
-  name: string;
-  type: string;
-  messageListVisibility?: string;
-  labelListVisibility?: string;
-  messagesTotal?: number;
-  messagesUnread?: number;
-  threadsTotal?: number;
-  threadsUnread?: number;
-}
-
-export interface LabelMessageSummary {
-  id: string;
-  threadId: string;
-  labelIds: string[];
 }
 
 function sanitizeHeader(value: string): string {
@@ -139,65 +265,34 @@ function buildPlainTextMessage(options: {
   return [...headers, "", options.body].join("\r\n");
 }
 
-function quoteMimeValue(value: string): string {
-  return sanitizeHeader(value).replace(/["\\]/g, "\\$&");
-}
-
-function wrapBase64(value: string): string {
-  return value.replace(/.{1,76}/g, "$&\r\n").trimEnd();
-}
-
-function buildPlainTextMessageWithAttachments(options: {
+function buildMultipartMessage(options: {
   to: string;
   subject: string;
   body: string;
-  inReplyTo?: string;
-  references?: string;
-  attachments: PreservedAttachment[];
+  attachment: { filename: string; mimeType: string; data: Buffer };
 }): string {
-  const boundary = `office-draft-update-${Date.now().toString(36)}-${Math.random()
-    .toString(36)
-    .slice(2)}`;
-  const headers = [
+  const boundary = `office_${randomBytes(18).toString("hex")}`;
+  const encoded = options.attachment.data.toString("base64").match(/.{1,76}/g)?.join("\r\n") ?? "";
+  return [
     "MIME-Version: 1.0",
     `To: ${sanitizeHeader(options.to)}`,
     `Subject: ${encodeHeader(options.subject)}`,
-  ];
-
-  if (options.inReplyTo) {
-    headers.push(`In-Reply-To: ${sanitizeHeader(options.inReplyTo)}`);
-  }
-  if (options.references) {
-    headers.push(`References: ${sanitizeHeader(options.references)}`);
-  }
-
-  headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
-
-  const parts = [
-    ...headers,
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
     "",
     `--${boundary}`,
     'Content-Type: text/plain; charset="UTF-8"',
     "Content-Transfer-Encoding: 8bit",
     "",
     options.body,
-  ];
-
-  for (const attachment of options.attachments) {
-    const filename = quoteMimeValue(attachment.filename || "attachment");
-    const mimeType = sanitizeHeader(attachment.mimeType || "application/octet-stream");
-    parts.push(
-      `--${boundary}`,
-      `Content-Type: ${mimeType}; name="${filename}"`,
-      "Content-Transfer-Encoding: base64",
-      `Content-Disposition: attachment; filename="${filename}"`,
-      "",
-      wrapBase64(attachment.data)
-    );
-  }
-
-  parts.push(`--${boundary}--`, "");
-  return parts.join("\r\n");
+    `--${boundary}`,
+    `Content-Type: ${sanitizeHeader(options.attachment.mimeType)}; name="${sanitizeHeader(options.attachment.filename)}"`,
+    "Content-Transfer-Encoding: base64",
+    `Content-Disposition: attachment; filename="${sanitizeHeader(options.attachment.filename)}"`,
+    "",
+    encoded,
+    `--${boundary}--`,
+    "",
+  ].join("\r\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -206,49 +301,92 @@ function buildPlainTextMessageWithAttachments(options: {
 
 export class GmailService {
   private gmail: gmail_v1.Gmail;
+  private readonly shadowIdentity: () => Promise<{data: any}>;
+  private readonly threadTokenKey: string;
+  private readonly accountBinding: string;
 
-  constructor(accessToken: string) {
+  constructor(
+    accessToken: string,
+    private readonly expectedAccount?: string,
+    private readonly signingKey?: string,
+  ) {
+    // Bind and sign page tokens with STABLE material, not the rotating ~1h
+    // OAuth access token. Deriving both account_binding and the HMAC key from
+    // the access token invalidated every list/thread page token whenever Google
+    // rotated the token between requests, which broke pagination (the consumer
+    // saw "empty, not complete, no cursor" and failed closed).
+    this.threadTokenKey = signingKey ?? accessToken;
+    this.accountBinding = createHash("sha256")
+      .update(expectedAccount ?? accessToken)
+      .digest("hex");
     const auth = new google.auth.OAuth2();
     auth.setCredentials({ access_token: accessToken });
     this.gmail = google.gmail({ version: "v1", auth });
+    this.shadowIdentity = () => google.oauth2({version:"v2", auth}).userinfo.get({}, {timeout:10000});
   }
 
   // -----------------------------------------------------------------------
   // list_emails
   // -----------------------------------------------------------------------
 
+  async getAdminThreadShadow(account: string, threadId: string) {
+    if (this.expectedAccount !== "admin@jurgisdid.com" || account !== this.expectedAccount) {
+      throw new Error("Exact admin service identity required for shadow read");
+    }
+    return readAdminThreadShadow({
+      identity: this.shadowIdentity,
+      profile: () => this.gmail.users.getProfile({userId:"me"}, {timeout:10000}),
+      thread: (id) => this.gmail.users.threads.get(
+        {userId:"me",id,format:"full"},
+        {timeout:15000,maxContentLength:8*1024*1024})
+    }, account, threadId);
+  }
+
   async listEmails(
     query?: string,
     maxResults: number = 20,
     pageToken?: string
-  ): Promise<EmailListPage> {
+  ): Promise<EmailPage> {
+    const requested = Math.max(1, Math.min(Math.floor(maxResults), 500));
+    const normalizedQuery = query || "";
+    const decodedToken = pageToken
+      ? decodeListPageToken(pageToken, this.threadTokenKey, this.accountBinding)
+      : null;
+    if (decodedToken && (decodedToken.query !== normalizedQuery || decodedToken.max_results !== requested)) {
+      throw new Error("Gmail list page token does not match the requested query and bounds");
+    }
+    if (pageToken) claimPageTokenReplay(pageToken, "list");
     const res = await this.gmail.users.messages.list({
       userId: "me",
       q: query || undefined,
-      maxResults: Math.min(maxResults, 100),
-      pageToken: pageToken || undefined,
+      maxResults: requested,
+      pageToken: decodedToken?.provider_page_token,
     });
-
     const messageIds = res.data.messages ?? [];
-    if (messageIds.length === 0) {
-      return {
-        emails: [],
-        nextPageToken: res.data.nextPageToken ?? null,
-        resultSizeEstimate: typeof res.data.resultSizeEstimate === "number" ? res.data.resultSizeEstimate : null,
-        paginationComplete: !res.data.nextPageToken,
-      };
+    if (messageIds.some((message) => typeof message.id !== "string" || !message.id)) {
+      throw new Error("Malformed Gmail message list response: every message requires an id");
     }
+    const providerNextPageToken = res.data.nextPageToken ?? null;
+    if (providerNextPageToken !== null && (typeof providerNextPageToken !== "string" || !providerNextPageToken)) {
+      throw new Error("Malformed Gmail message list response: invalid continuation token");
+    }
+    const nextPageToken = providerNextPageToken === null ? null : encodeListPageToken({
+      version: 2,
+      provider: "gmail",
+      account_binding: this.accountBinding,
+      query: normalizedQuery,
+      max_results: requested,
+      provider_page_token: providerNextPageToken,
+    }, this.threadTokenKey);
 
-    // Fetch headers for each message in parallel (batched)
     const summaries = await Promise.all(
-      messageIds.map((m) => this.getEmailSummary(m.id!))
+      messageIds.map((message) => this.getEmailSummary(message.id!))
     );
 
     return {
       emails: summaries,
-      nextPageToken: res.data.nextPageToken ?? null,
-      resultSizeEstimate: typeof res.data.resultSizeEstimate === "number" ? res.data.resultSizeEstimate : null,
-      paginationComplete: !res.data.nextPageToken,
+      nextPageToken,
+      paginationComplete: nextPageToken === null,
     };
   }
 
@@ -259,8 +397,14 @@ export class GmailService {
       format: "metadata",
       metadataHeaders: ["Subject", "From", "Date"],
     });
+    if (!res.data.id || !res.data.threadId || !res.data.payload) {
+      throw new Error("Malformed Gmail message summary response: id, threadId, and payload are required");
+    }
+    if (res.data.id !== messageId) {
+      throw new Error("Gmail message summary identity did not match the requested message");
+    }
 
-    const headers = res.data.payload?.headers ?? [];
+    const headers = res.data.payload.headers ?? [];
     const hdr = (name: string) =>
       headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())
         ?.value ?? "";
@@ -286,8 +430,20 @@ export class GmailService {
       id: messageId,
       format: "full",
     });
+    if (!res.data.id || !res.data.threadId || !res.data.payload) {
+      throw new Error("Malformed Gmail message response: id, threadId, and payload are required");
+    }
+    if (res.data.id !== messageId) {
+      throw new Error("Gmail message identity did not match the requested message");
+    }
 
-    const headers = res.data.payload?.headers ?? [];
+    const safePayload = stripAttachments(res.data.payload);
+    const headers: gmail_v1.Schema$MessagePartHeader[] = safePayload.headers ?? [];
+    for (const name of ["from", "subject", "date", "message-id"]) {
+      if (headers.filter((h) => h.name?.toLowerCase() === name).length > 1) {
+        throw new Error("Ambiguous Gmail source headers");
+      }
+    }
     const hdr = (name: string) =>
       headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())
         ?.value ?? "";
@@ -297,8 +453,12 @@ export class GmailService {
       if (h.name && h.value) headersMap[h.name] = h.value;
     }
 
-    const body = this.extractBody(res.data.payload ?? {});
+    const body = this.extractBody(safePayload);
     const unsubscribeLinks = this.parseUnsubscribeLinks(headersMap, body);
+    const attachments = this.extractAttachments(res.data.payload ?? {});
+    if (attachments.some((attachment) => !attachment.attachment_id)) {
+      throw new Error("Malformed Gmail attachment evidence: attachment id is required");
+    }
 
     return {
       id: res.data.id!,
@@ -307,12 +467,221 @@ export class GmailService {
       from: hdr("From"),
       to: hdr("To"),
       date: hdr("Date"),
-      snippet: res.data.snippet ?? "",
+      snippet: body.slice(0, 200), // never substitute provider preview for excluded body evidence
       body,
       labelIds: res.data.labelIds ?? [],
       headers: headersMap,
-      attachments: this.extractAttachments(res.data.payload),
       unsubscribeLinks,
+      attachments,
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // get_attachment — source-bound original bytes for one Gmail attachment
+  // -----------------------------------------------------------------------
+
+  async getAttachment(messageId: string, attachmentId: string, expectedFilename?: string) {
+    const message = await this.gmail.users.messages.get({
+      userId: "me",
+      id: messageId,
+      format: "full",
+    });
+    if (message.data.id !== messageId || !message.data.payload) {
+      throw new Error("Gmail provider message identity did not match the requested attachment source");
+    }
+    const idMatches: gmail_v1.Schema$MessagePart[] = [];
+    const filenameMatches: gmail_v1.Schema$MessagePart[] = [];
+    const visit = (part: gmail_v1.Schema$MessagePart) => {
+      if (part.body?.attachmentId === attachmentId) idMatches.push(part);
+      if (expectedFilename && part.filename === expectedFilename) filenameMatches.push(part);
+      for (const child of part.parts ?? []) visit(child);
+    };
+    visit(message.data.payload);
+    // Prefer an exact ID match; fall back to the stable filename (Gmail attachment
+    // IDs are not stable across reads, see office-gateway-build-deploy skill).
+    const part =
+      idMatches.length === 1
+        ? idMatches[0]
+        : filenameMatches.length === 1
+          ? filenameMatches[0]
+          : undefined;
+    if (!part || (idMatches.length === 0 && filenameMatches.length !== 1)) {
+      throw new Error("Gmail attachment ID/filename was absent or ambiguous in the source message");
+    }
+    const realAttachmentId = part.body?.attachmentId;
+    const filename = part.filename?.trim() ?? "";
+    const mimeType = part.mimeType?.trim() ?? "";
+    const declaredSize = part.body?.size;
+    if (!realAttachmentId || !filename || !mimeType || !Number.isSafeInteger(declaredSize) || Number(declaredSize) <= 0) {
+      throw new Error("Gmail attachment metadata is incomplete");
+    }
+    const attachment = await this.gmail.users.messages.attachments.get({
+      userId: "me",
+      messageId,
+      id: realAttachmentId,
+    });
+    // Gmail's attachments.get does not always round-trip body.attachmentId / body.size
+    // from messages.get; validate on the decoded bytes themselves instead.
+    const encoded = attachment.data.data;
+    if (!encoded) throw new Error("Gmail provider returned metadata without original attachment bytes");
+    const bytes = Buffer.from(encoded, "base64url");
+    if (bytes.length === 0) throw new Error("Gmail provider attachment bytes were empty");
+    // Independent provider-size verification: the decoded byte length must equal
+    // the provider-declared attachment size (messages.get part.body.size). A
+    // regenerated size/hash only proves transport consistency; comparing the
+    // decoded length to the provider-declared size proves the fetch was not
+    // truncated at the source and fails closed on any mismatch.
+    if (bytes.length !== Number(declaredSize)) {
+      throw new Error(
+        `Gmail attachment decoded size (${bytes.length}) does not match the provider-declared size (${declaredSize}); the fetch may be truncated.`,
+      );
+    }
+    return {
+      source_message_id: messageId,
+      attachment_id: realAttachmentId,
+      filename,
+      mime_type: mimeType,
+      byte_size: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      bytes_base64: bytes.toString("base64"),
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // get_thread — full evidence for every message in a material thread
+  // -----------------------------------------------------------------------
+
+  async getThread(
+    threadId: string,
+    maxResults: number = 20,
+    pageToken?: string
+  ): Promise<ThreadPage> {
+    const limit = Math.max(1, Math.min(Math.floor(maxResults), 100));
+    const decodedToken = pageToken === undefined
+      ? null
+      : decodeThreadPageToken(pageToken, this.threadTokenKey, this.accountBinding);
+    if (decodedToken && decodedToken.thread_id !== threadId) {
+      throw new Error("Gmail thread page token does not belong to the requested thread");
+    }
+    if (pageToken) claimPageTokenReplay(pageToken, "thread");
+    let authoritativeAccount: string | null = null;
+    if (this.expectedAccount) {
+      const profile = await this.gmail.users.getProfile({ userId: "me" });
+      authoritativeAccount = profile.data.emailAddress?.trim().toLowerCase() ?? null;
+      if (!authoritativeAccount || authoritativeAccount !== this.expectedAccount.toLowerCase()) {
+        throw new Error("Gmail provider account identity did not match the routed account");
+      }
+    }
+    const thread = await this.gmail.users.threads.get({
+      userId: "me",
+      id: threadId,
+      format: "minimal",
+    });
+    if (thread.data.id !== threadId) {
+      throw new Error("Gmail provider thread identity did not match the requested thread");
+    }
+    if (!Array.isArray(thread.data.messages)) {
+      throw new Error("Malformed Gmail thread response: messages must be an array");
+    }
+    const rawMessages = thread.data.messages;
+    if (rawMessages.some((message) => !message.id)) {
+      throw new Error("Malformed Gmail thread response: every message requires an id");
+    }
+    const messageIds = rawMessages.map((message) => message.id as string);
+    const boundsHash = threadBoundsHash(messageIds);
+    if (decodedToken && decodedToken.bounds_hash !== boundsHash) {
+      throw new Error("Gmail thread page token no longer matches the current thread bounds");
+    }
+    const offset = decodedToken?.offset ?? 0;
+    if (decodedToken && offset >= messageIds.length) {
+      throw new Error("Gmail thread page token no longer matches the current thread bounds");
+    }
+    const end = Math.min(offset + limit, messageIds.length);
+    const messages = await Promise.all(
+      messageIds.slice(offset, end).map((messageId) => this.getEmail(messageId))
+    );
+    if (messages.some((message) => message.threadId !== threadId)) {
+      throw new Error("Gmail thread identity did not match the requested thread");
+    }
+    return {
+      account: authoritativeAccount,
+      provider: "gmail",
+      threadId,
+      messages,
+      nextPageToken: end < messageIds.length
+        ? encodeThreadPageToken({
+          version: 2,
+          provider: "gmail",
+          account_binding: this.accountBinding,
+          thread_id: threadId,
+          offset: end,
+          bounds_hash: boundsHash,
+          traversal: decodedToken?.traversal ?? randomBytes(16).toString("base64url"),
+        }, this.threadTokenKey)
+        : null,
+      threadComplete: end >= messageIds.length,
+      attachmentComplete: true,
+    };
+  }
+
+  async getDraftAttachment(draftId: string, filename: string) {
+    const draft = await this.gmail.users.drafts.get({
+      userId: "me",
+      id: draftId,
+      format: "full",
+    });
+    if (draft.data.id !== draftId) {
+      throw new Error("Gmail provider draft identity did not match the requested draft.");
+    }
+    const message = draft.data.message;
+    if (!message?.id || !message.payload) {
+      throw new Error("Gmail draft read-back omitted the draft message.");
+    }
+    const matches: gmail_v1.Schema$MessagePart[] = [];
+    const visit = (part: gmail_v1.Schema$MessagePart) => {
+      if (part.filename === filename) matches.push(part);
+      for (const child of part.parts ?? []) visit(child);
+    };
+    visit(message.payload);
+    if (matches.length !== 1) {
+      throw new Error(`Gmail draft must contain exactly one attachment named "${filename}".`);
+    }
+    const part = matches[0];
+    const declaredSize = part.body?.size;
+    if (!Number.isSafeInteger(declaredSize) || Number(declaredSize) <= 0) {
+      throw new Error("Gmail draft attachment requires positive safe-integer size metadata.");
+    }
+    let encoded = part.body?.data ?? null;
+    if (!encoded && part.body?.attachmentId) {
+      const requestedAttachmentId = part.body.attachmentId;
+      const attachment = await this.gmail.users.messages.attachments.get({
+        userId: "me",
+        messageId: message.id,
+        id: requestedAttachmentId,
+      });
+      if (
+        attachment.data.attachmentId !== requestedAttachmentId ||
+        !Number.isSafeInteger(attachment.data.size) ||
+        Number(attachment.data.size) !== declaredSize
+      ) {
+        throw new Error("Gmail provider attachment identity or size did not match the draft part.");
+      }
+      encoded = attachment.data.data ?? null;
+    }
+    if (!encoded) throw new Error("Gmail draft attachment bytes were unavailable.");
+    const bytes = Buffer.from(encoded, "base64url");
+    if (bytes.length === 0 || bytes.length !== declaredSize) {
+      throw new Error("Gmail draft attachment byte length did not match its metadata.");
+    }
+    return {
+      source: "gmail-draft-readback" as const,
+      draft_id: draftId,
+      message_id: message.id,
+      filename,
+      mime_type: part.mimeType ?? "application/octet-stream",
+      size: bytes.length,
+      attachment_base64: bytes.toString("base64"),
+      complete: true,
     };
   }
 
@@ -352,23 +721,6 @@ export class GmailService {
     return { success: true, labelId };
   }
 
-  async removeLabel(
-    messageId: string,
-    labelName: string
-  ): Promise<{ success: boolean; labelId: string }> {
-    const labelId = await this.getOrCreateLabel(labelName);
-
-    await this.gmail.users.messages.modify({
-      userId: "me",
-      id: messageId,
-      requestBody: {
-        removeLabelIds: [labelId],
-      },
-    });
-
-    return { success: true, labelId };
-  }
-
   private async getOrCreateLabel(labelName: string): Promise<string> {
     // Check existing labels
     const res = await this.gmail.users.labels.list({ userId: "me" });
@@ -390,154 +742,181 @@ export class GmailService {
   }
 
   // -----------------------------------------------------------------------
-  // label administration
+  // remove_label — remove a label from a message
   // -----------------------------------------------------------------------
 
-  async createLabel(labelName: string): Promise<{ success: boolean; label: GmailLabelSummary }> {
-    const labelId = await this.getOrCreateLabel(labelName);
-    const full = await this.gmail.users.labels.get({ userId: "me", id: labelId });
-    return { success: true, label: this.toLabelSummary(full.data) };
-  }
-
-  async listLabels(): Promise<GmailLabelSummary[]> {
+  async removeLabel(messageId: string, labelName: string): Promise<{ success: boolean }> {
     const res = await this.gmail.users.labels.list({ userId: "me" });
-    const labels = res.data.labels ?? [];
-    const detailed = await Promise.all(
-      labels.map(async (label) => {
-        const id = label.id!;
-        try {
-          const full = await this.gmail.users.labels.get({ userId: "me", id });
-          return this.toLabelSummary(full.data);
-        } catch {
-          return this.toLabelSummary(label);
-        }
-      })
+    const label = (res.data.labels ?? []).find(
+      (l) => l.name?.toLowerCase() === labelName.toLowerCase()
     );
-    return detailed.sort((a, b) => a.name.localeCompare(b.name));
-  }
-
-  async listLabelMessages(
-    labelId: string,
-    maxResults: number = 500
-  ): Promise<{
-    labelId: string;
-    messages: LabelMessageSummary[];
-    paginationComplete: boolean;
-  }> {
-    const messages: LabelMessageSummary[] = [];
-    let pageToken: string | undefined;
-    const limit = Math.min(Math.max(maxResults, 1), 500);
-
-    while (messages.length < limit) {
-      const res = await this.gmail.users.messages.list({
-        userId: "me",
-        labelIds: [labelId],
-        maxResults: Math.min(100, limit - messages.length),
-        pageToken,
-      });
-      const ids = res.data.messages ?? [];
-      const page = await Promise.all(
-        ids.map(async (message) => {
-          const full = await this.gmail.users.messages.get({
-            userId: "me",
-            id: message.id!,
-            format: "metadata",
-          });
-          return {
-            id: full.data.id!,
-            threadId: full.data.threadId!,
-            labelIds: full.data.labelIds ?? [],
-          };
-        })
-      );
-      messages.push(...page);
-      pageToken = res.data.nextPageToken ?? undefined;
-      if (!pageToken || ids.length === 0) break;
-    }
-
-    return {
-      labelId,
-      messages,
-      paginationComplete: !pageToken,
-    };
-  }
-
-  async migrateLabelMessages(
-    labelId: string,
-    destinationLabelName: string,
-    maxResults: number = 500
-  ): Promise<{
-    success: boolean;
-    sourceLabelId: string;
-    destinationLabelId: string;
-    migratedMessageIds: string[];
-    paginationComplete: boolean;
-  }> {
-    const destinationLabelId = await this.getOrCreateLabel(destinationLabelName);
-    const listed = await this.listLabelMessages(labelId, maxResults);
-    const messageIds = listed.messages.map((message) => message.id);
-
-    for (let index = 0; index < messageIds.length; index += 100) {
-      const batch = messageIds.slice(index, index + 100);
-      if (batch.length === 0) continue;
-      await this.gmail.users.messages.batchModify({
-        userId: "me",
-        requestBody: {
-          ids: batch,
-          addLabelIds: [destinationLabelId],
-          removeLabelIds: [labelId],
-        },
-      });
-    }
-
-    return {
-      success: true,
-      sourceLabelId: labelId,
-      destinationLabelId,
-      migratedMessageIds: messageIds,
-      paginationComplete: listed.paginationComplete,
-    };
-  }
-
-  async updateLabel(options: {
-    labelId: string;
-    name?: string;
-    labelListVisibility?: string;
-    messageListVisibility?: string;
-  }): Promise<{ success: boolean; label: GmailLabelSummary }> {
-    const requestBody: gmail_v1.Schema$Label = {};
-    if (options.name) requestBody.name = options.name;
-    if (options.labelListVisibility) {
-      requestBody.labelListVisibility = options.labelListVisibility;
-    }
-    if (options.messageListVisibility) {
-      requestBody.messageListVisibility = options.messageListVisibility;
-    }
-    const res = await this.gmail.users.labels.patch({
+    const removeLabelIds = label?.id ? [label.id] : [labelName];
+    await this.gmail.users.messages.modify({
       userId: "me",
-      id: options.labelId,
-      requestBody,
+      id: messageId,
+      requestBody: { removeLabelIds },
     });
-    return { success: true, label: this.toLabelSummary(res.data) };
+    return { success: true };
   }
 
-  async deleteLabel(labelId: string): Promise<{ success: boolean; labelId: string }> {
-    await this.gmail.users.labels.delete({ userId: "me", id: labelId });
+  // -----------------------------------------------------------------------
+  // list_labels
+  // -----------------------------------------------------------------------
+
+  async listLabels(): Promise<{ labels: Array<{ id: string; name: string }>; paginationComplete: boolean }> {
+    const res = await this.gmail.users.labels.list({ userId: "me" });
+    return {
+      labels: (res.data.labels ?? []).map((l) => ({ id: l.id ?? "", name: l.name ?? "" })),
+      paginationComplete: true,
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // create_label
+  // -----------------------------------------------------------------------
+
+  async createLabel(name: string): Promise<{ success: boolean; labelId: string }> {
+    const labelId = await this.getOrCreateLabel(name);
     return { success: true, labelId };
   }
 
-  private toLabelSummary(label: gmail_v1.Schema$Label): GmailLabelSummary {
+  // -----------------------------------------------------------------------
+  // delete_label
+  // -----------------------------------------------------------------------
+
+  async deleteLabel(labelId: string): Promise<{ success: boolean }> {
+    await this.gmail.users.labels.delete({ userId: "me", id: labelId });
+    return { success: true };
+  }
+
+  // -----------------------------------------------------------------------
+  // migrate_label_messages — move messages from one label to another
+  // -----------------------------------------------------------------------
+
+  async migrateLabelMessages(
+    sourceLabelId: string,
+    destinationLabelName: string,
+    maxResults: number
+  ): Promise<{ success: boolean; migrated: number; paginationComplete: boolean }> {
+    const destLabelId = await this.getOrCreateLabel(destinationLabelName);
+    let migrated = 0;
+    let pageToken: string | undefined;
+    let paginationComplete = true;
+    const cap = Math.max(1, Math.min(Math.floor(maxResults), 500));
+    do {
+      const res = await this.gmail.users.messages.list({
+        userId: "me",
+        labelIds: [sourceLabelId],
+        maxResults: cap,
+        pageToken,
+      });
+      const ids = (res.data.messages ?? []).map((m) => m.id!).filter(Boolean);
+      if (ids.length) {
+        await this.gmail.users.messages.batchModify({
+          userId: "me",
+          requestBody: { ids, addLabelIds: [destLabelId] },
+        });
+        migrated += ids.length;
+      }
+      if (migrated >= maxResults) {
+        paginationComplete = !res.data.nextPageToken && ids.length < cap;
+        break;
+      }
+      pageToken = res.data.nextPageToken ?? undefined;
+    } while (pageToken);
+    return { success: true, migrated, paginationComplete };
+  }
+
+  // -----------------------------------------------------------------------
+  // list_drafts
+  // -----------------------------------------------------------------------
+
+  async listDrafts(
+    query?: string,
+    maxResults = 20
+  ): Promise<{ drafts: Array<{ id: string; thread_id: string }>; paginationComplete: boolean }> {
+    const res = await this.gmail.users.drafts.list({
+      userId: "me",
+      q: query || undefined,
+      maxResults: Math.max(1, Math.min(Math.floor(maxResults), 500)),
+    });
     return {
-      id: label.id ?? "",
-      name: label.name ?? "",
-      type: label.type ?? "",
-      messageListVisibility: label.messageListVisibility ?? undefined,
-      labelListVisibility: label.labelListVisibility ?? undefined,
-      messagesTotal: label.messagesTotal ?? undefined,
-      messagesUnread: label.messagesUnread ?? undefined,
-      threadsTotal: label.threadsTotal ?? undefined,
-      threadsUnread: label.threadsUnread ?? undefined,
+      drafts: (res.data.drafts ?? []).map((d) => ({ id: d.id ?? "", thread_id: d.message?.threadId ?? "" })),
+      paginationComplete: !res.data.nextPageToken,
     };
+  }
+
+  async prepareDraftSend(draftId: string) {
+    const result = await this.gmail.users.drafts.get({userId: 'me', id: draftId, format: 'raw'});
+    return inspectSendRaw(this.expectedAccount ?? '', draftId, result.data.message?.raw ?? '', result.data.message?.threadId ?? '');
+  }
+
+  async sendDraftSnapshot(draftId: string, expectedFingerprint: string, beforeSend: () => void = () => {}) {
+    const snapshot = await this.prepareDraftSend(draftId);
+    if (snapshot.fingerprint !== expectedFingerprint) throw new Error('SEND_DRAFT_CHANGED');
+    beforeSend();
+    const result = await this.gmail.users.messages.send({userId:'me', requestBody:{raw:snapshot.raw, ...(snapshot.thread_id ? {threadId:snapshot.thread_id} : {})}}, {retry:false});
+    if (!result.data.id) throw new Error('SEND_OUTCOME_UNKNOWN');
+    const readback = await this.gmail.users.messages.get({userId:'me', id:result.data.id, format:'metadata'});
+    if (!readback.data.labelIds?.includes('SENT')) throw new Error('SEND_READBACK_UNCONFIRMED');
+    return {sent:true, message_id:result.data.id, thread_id:result.data.threadId, fingerprint:expectedFingerprint, account:this.expectedAccount, draft_retained:true};
+  }
+
+  // -----------------------------------------------------------------------
+  // get_draft
+  // -----------------------------------------------------------------------
+
+  async getDraft(draftId: string): Promise<Record<string, unknown>> {
+    const res = await this.gmail.users.drafts.get({ userId: "me", id: draftId, format: "full" });
+    return { draft: res.data };
+  }
+
+  // -----------------------------------------------------------------------
+  // delete_draft
+  // -----------------------------------------------------------------------
+
+  async deleteDraft(draftId: string): Promise<{ success: boolean }> {
+    await this.gmail.users.drafts.delete({ userId: "me", id: draftId });
+    return { success: true };
+  }
+
+  // -----------------------------------------------------------------------
+  // update_draft — rewrite an existing draft's headers/body/thread
+  // -----------------------------------------------------------------------
+
+  async updateDraft(options: {
+    draftId: string;
+    to?: string;
+    subject?: string;
+    body?: string;
+    threadId?: string;
+    replyMessageId?: string;
+  }): Promise<{ success: boolean; draftId: string }> {
+    const current = await this.gmail.users.drafts.get({
+      userId: "me",
+      id: options.draftId,
+      format: "full",
+    });
+    const existing = current.data.message ?? {};
+    const headers = existing.payload?.headers ?? [];
+    const getHeader = (n: string) =>
+      headers.find((h) => h.name?.toLowerCase() === n.toLowerCase())?.value ?? "";
+    const to = options.to ?? getHeader("To");
+    const subject = options.subject ?? getHeader("Subject");
+    const body = options.body ?? "";
+    const threadId = options.threadId ?? existing.threadId ?? undefined;
+    const raw = Buffer.from(
+      buildPlainTextMessage({ to, subject, body }),
+      "utf8"
+    ).toString("base64url");
+    const requestBody: gmail_v1.Schema$Draft = { message: { raw } };
+    if (threadId) requestBody.message!.threadId = threadId;
+    const res = await this.gmail.users.drafts.update({
+      userId: "me",
+      id: options.draftId,
+      requestBody,
+    });
+    return { success: true, draftId: res.data.id ?? options.draftId };
   }
 
   // -----------------------------------------------------------------------
@@ -672,20 +1051,10 @@ export class GmailService {
     body: string;
     threadId?: string;
     replyMessageId?: string;
-  }): Promise<DraftResult> {
-    if (options.threadId && !options.replyMessageId) {
-      throw new Error("reply_message_id is required when thread_id is supplied.");
-    }
-
+  }): Promise<{ draftId: string; threadId?: string }> {
     const replyTo = options.replyMessageId
       ? await this.getEmail(options.replyMessageId)
       : null;
-
-    if (options.threadId && replyTo?.threadId && options.threadId !== replyTo.threadId) {
-      throw new Error(
-        "thread_id does not match the provider thread for reply_message_id."
-      );
-    }
 
     const to = options.to || (replyTo ? extractAddress(replyTo.from) : "");
     const subject =
@@ -724,242 +1093,9 @@ export class GmailService {
       requestBody,
     });
 
-    const draftId = res.data.id!;
-    const draftMessageId =
-      res.data.message?.id ??
-      (draftId
-        ? (
-            await this.gmail.users.drafts.get({
-              userId: "me",
-              id: draftId,
-              format: "metadata",
-            })
-          ).data.message?.id ?? undefined
-        : undefined);
-    const returnedThreadId = res.data.message?.threadId ?? undefined;
-
-    if (!threadId) {
-      return {
-        draftId,
-        messageId: draftMessageId,
-        threadId: returnedThreadId,
-        threaded: false,
-      };
-    }
-
-    const verification = await this.verifyDraftThreadMembership(
-      threadId,
-      draftMessageId
-    );
-
-    if (!verification.draftInThread) {
-      throw new Error(
-        "Draft was created but Gmail threads.get does not show it in the requested thread."
-      );
-    }
-
     return {
-      draftId,
-      messageId: draftMessageId,
-      threadId: returnedThreadId,
-      replyMessageId: options.replyMessageId,
-      threaded: true,
-      threadVerification: verification,
-    };
-  }
-
-  async listDrafts(
-    query?: string,
-    maxResults: number = 20
-  ): Promise<DraftDetail[]> {
-    const res = await this.gmail.users.drafts.list({
-      userId: "me",
-      q: query || undefined,
-      maxResults: Math.min(maxResults, 100),
-    });
-
-    const drafts = res.data.drafts ?? [];
-    return Promise.all(
-      drafts.map((draft) => this.getDraft(draft.id!))
-    );
-  }
-
-  async getDraft(
-    draftId: string,
-    expectedThreadId?: string
-  ): Promise<DraftDetail> {
-    const res = await this.gmail.users.drafts.get({
-      userId: "me",
-      id: draftId,
-      format: "full",
-    });
-    const message = res.data.message;
-    if (!message?.id) {
-      throw new Error(`Draft ${draftId} did not contain a Gmail message.`);
-    }
-
-    const detail = this.emailDetailFromMessage(message);
-    const threadVerification = expectedThreadId
-      ? await this.verifyDraftThreadMembership(expectedThreadId, message.id)
-      : undefined;
-
-    return {
-      draftId,
-      ...detail,
-      threadVerification,
-    };
-  }
-
-  async updateDraft(options: {
-    draftId: string;
-    to?: string;
-    subject?: string;
-    body: string;
-    threadId?: string;
-    replyMessageId?: string;
-  }): Promise<DraftResult> {
-    if (options.threadId && !options.replyMessageId) {
-      throw new Error("reply_message_id is required when thread_id is supplied.");
-    }
-
-    const existingDraftRes = await this.gmail.users.drafts.get({
-      userId: "me",
-      id: options.draftId,
-      format: "full",
-    });
-    const existingDraftMessage = existingDraftRes.data.message;
-    if (!existingDraftMessage?.id) {
-      throw new Error(`Draft ${options.draftId} did not contain a Gmail message.`);
-    }
-    const existingDraft: DraftDetail = {
-      draftId: options.draftId,
-      ...this.emailDetailFromMessage(existingDraftMessage),
-    };
-    const preservedAttachments = await this.fetchPreservedAttachments(
-      existingDraftMessage
-    );
-    const replyTo = options.replyMessageId
-      ? await this.getEmail(options.replyMessageId)
-      : null;
-
-    if (options.threadId && replyTo?.threadId && options.threadId !== replyTo.threadId) {
-      throw new Error(
-        "thread_id does not match the provider thread for reply_message_id."
-      );
-    }
-
-    const threadId = options.threadId ?? replyTo?.threadId ?? existingDraft.threadId;
-    const to = options.to || (replyTo ? extractAddress(replyTo.from) : existingDraft.to);
-    const subject =
-      options.subject ||
-      (replyTo?.subject
-        ? /^re:/i.test(replyTo.subject)
-          ? replyTo.subject
-          : `Re: ${replyTo.subject}`
-        : existingDraft.subject);
-    const messageIdHeader = replyTo?.headers["Message-ID"];
-    const referencesHeader = replyTo
-      ? [replyTo.headers.References, messageIdHeader].filter(Boolean).join(" ")
-      : existingDraft.headers.References;
-
-    const rawMessage =
-      preservedAttachments.length > 0
-        ? buildPlainTextMessageWithAttachments({
-            to,
-            subject,
-            body: options.body,
-            inReplyTo: messageIdHeader ?? existingDraft.headers["In-Reply-To"],
-            references: referencesHeader,
-            attachments: preservedAttachments,
-          })
-        : buildPlainTextMessage({
-            to,
-            subject,
-            body: options.body,
-            inReplyTo: messageIdHeader ?? existingDraft.headers["In-Reply-To"],
-            references: referencesHeader,
-          });
-
-    const raw = Buffer.from(rawMessage, "utf8").toString("base64url");
-
-    const requestBody: gmail_v1.Schema$Draft = {
-      id: options.draftId,
-      message: { raw },
-    };
-    if (threadId) {
-      requestBody.message!.threadId = threadId;
-    }
-
-    const res = await this.gmail.users.drafts.update({
-      userId: "me",
-      id: options.draftId,
-      requestBody,
-    });
-
-    const draftMessageId =
-      res.data.message?.id ??
-      (
-        await this.gmail.users.drafts.get({
-          userId: "me",
-          id: options.draftId,
-          format: "metadata",
-        })
-      ).data.message?.id ?? undefined;
-    const returnedThreadId = res.data.message?.threadId ?? threadId;
-
-    const verification = threadId
-      ? await this.verifyDraftThreadMembership(threadId, draftMessageId)
-      : undefined;
-
-    if (threadId && !verification?.draftInThread) {
-      throw new Error(
-        "Draft was updated but Gmail threads.get does not show it in the requested thread."
-      );
-    }
-
-    return {
-      draftId: options.draftId,
-      messageId: draftMessageId,
-      threadId: returnedThreadId,
-      replyMessageId: options.replyMessageId,
-      threaded: Boolean(threadId),
-      attachmentPreservation: {
-        preserved: preservedAttachments.length > 0,
-        count: preservedAttachments.length,
-        filenames: preservedAttachments.map((attachment) => attachment.filename),
-      },
-      threadVerification: verification,
-    };
-  }
-
-  async deleteDraft(draftId: string): Promise<{ success: boolean; draftId: string }> {
-    await this.gmail.users.drafts.delete({
-      userId: "me",
-      id: draftId,
-    });
-    return { success: true, draftId };
-  }
-
-  async verifyDraftThreadMembership(
-    expectedThreadId: string,
-    draftMessageId?: string
-  ): Promise<NonNullable<DraftResult["threadVerification"]>> {
-    const thread = await this.gmail.users.threads.get({
-      userId: "me",
-      id: expectedThreadId,
-      format: "metadata",
-    });
-    const memberMessageIds = (thread.data.messages ?? [])
-      .map((message) => message.id)
-      .filter((id): id is string => Boolean(id));
-    return {
-      method: "gmail.threads.get",
-      expectedThreadId,
-      draftMessageId,
-      memberMessageIds,
-      draftInThread: Boolean(
-        draftMessageId && memberMessageIds.includes(draftMessageId)
-      ),
+      draftId: res.data.id!,
+      threadId: res.data.message?.threadId ?? undefined,
     };
   }
 
@@ -973,6 +1109,7 @@ export class GmailService {
     body: string;
     threadId?: string;
     replyMessageId?: string;
+    attachment?: { filename: string; mimeType: string; data: Buffer };
   }): Promise<{ messageId: string; threadId?: string }> {
     const replyTo = options.replyMessageId
       ? await this.getEmail(options.replyMessageId)
@@ -992,16 +1129,10 @@ export class GmailService {
       ? [replyTo.headers.References, messageIdHeader].filter(Boolean).join(" ")
       : undefined;
 
-    const raw = Buffer.from(
-      buildPlainTextMessage({
-        to,
-        subject,
-        body: options.body,
-        inReplyTo: messageIdHeader,
-        references: referencesHeader,
-      }),
-      "utf8"
-    ).toString("base64url");
+    const message = options.attachment
+      ? buildMultipartMessage({to, subject, body: options.body, attachment: options.attachment})
+      : buildPlainTextMessage({to, subject, body: options.body, inReplyTo: messageIdHeader, references: referencesHeader});
+    const raw = Buffer.from(message, "utf8").toString("base64url");
 
     const requestBody: gmail_v1.Schema$Message = { raw };
     if (threadId) {
@@ -1027,7 +1158,7 @@ export class GmailService {
     query: string,
     maxResults: number = 20,
     pageToken?: string
-  ): Promise<EmailListPage> {
+  ): Promise<EmailPage> {
     return this.listEmails(query, maxResults, pageToken);
   }
 
@@ -1035,114 +1166,33 @@ export class GmailService {
   // Helpers
   // -----------------------------------------------------------------------
 
-  private emailDetailFromMessage(message: gmail_v1.Schema$Message): EmailDetail {
-    const headers = message.payload?.headers ?? [];
-    const hdr = (name: string) =>
-      headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())
-        ?.value ?? "";
-
-    const headersMap: Record<string, string> = {};
-    for (const h of headers) {
-      if (h.name && h.value) headersMap[h.name] = h.value;
-    }
-
-    const body = this.extractBody(message.payload ?? {});
-    const unsubscribeLinks = this.parseUnsubscribeLinks(headersMap, body);
-
-    return {
-      id: message.id!,
-      threadId: message.threadId!,
-      subject: hdr("Subject"),
-      from: hdr("From"),
-      to: hdr("To"),
-      date: hdr("Date"),
-      snippet: message.snippet ?? "",
-      body,
-      labelIds: message.labelIds ?? [],
-      headers: headersMap,
-      attachments: this.extractAttachments(message.payload),
-      unsubscribeLinks,
-    };
-  }
-
-  private extractAttachments(
-    payload?: gmail_v1.Schema$MessagePart
-  ): AttachmentSummary[] {
-    if (!payload) return [];
-    const attachments: AttachmentSummary[] = [];
-    const visit = (part: gmail_v1.Schema$MessagePart) => {
-      const filename = part.filename ?? "";
-      const attachmentId = part.body?.attachmentId ?? undefined;
-      if (filename || attachmentId) {
-        attachments.push({
-          filename,
-          mimeType: part.mimeType ?? "",
-          attachmentId,
-          size: part.body?.size ?? undefined,
-          partId: part.partId ?? undefined,
-        });
-      }
-      for (const child of part.parts ?? []) visit(child);
-    };
-    visit(payload);
-    return attachments;
-  }
-
-  private async fetchPreservedAttachments(
-    message: gmail_v1.Schema$Message
-  ): Promise<PreservedAttachment[]> {
-    if (!message.id || !message.payload) return [];
-    const attachments: PreservedAttachment[] = [];
-
-    const visit = async (part: gmail_v1.Schema$MessagePart): Promise<void> => {
-      const filename = part.filename ?? "";
-      const attachmentId = part.body?.attachmentId ?? undefined;
-      const inlineData = part.body?.data ?? undefined;
-
-      if (filename || attachmentId) {
-        let data = inlineData;
-        if (!data && attachmentId) {
-          const attachment = await this.gmail.users.messages.attachments.get({
-            userId: "me",
-            messageId: message.id!,
-            id: attachmentId,
-          });
-          data = attachment.data.data ?? undefined;
-        }
-
-        if (!data) {
-          throw new Error(
-            `Draft ${message.id} contains attachment ${filename || attachmentId} but Gmail did not return attachment data.`
-          );
-        }
-
-        attachments.push({
-          filename,
-          mimeType: part.mimeType ?? "application/octet-stream",
-          attachmentId,
-          size: part.body?.size ?? undefined,
-          partId: part.partId ?? undefined,
-          data: Buffer.from(data, "base64url").toString("base64"),
-        });
-      }
-
-      for (const child of part.parts ?? []) {
-        await visit(child);
-      }
-    };
-
-    await visit(message.payload);
-    return attachments;
-  }
-
   private extractBody(payload: gmail_v1.Schema$MessagePart): string {
+    // Called only after stripAttachments validates/fences the entire MIME tree.
+    const decode = (part: gmail_v1.Schema$MessagePart): string => {
+      const bytes = Buffer.from(part.body?.data ?? "", "base64url");
+      const contentType = (part.headers ?? []).find(h => h.name?.toLowerCase() === "content-type")?.value ?? "";
+      const match = /(?:^|;)\s*charset\s*=\s*(?:"([^"]*)"|([^;\s]+))/i.exec(contentType);
+      if (/charset\s*=/i.test(contentType) && !match) throw new Error("Unresolved Gmail body encoding");
+      const charset = (match?.[1] ?? match?.[2] ?? "utf-8").toLowerCase().replace(/_/g, "-");
+      if (charset === "utf-8" || charset === "utf8") return new TextDecoder("utf-8", {fatal:true, ignoreBOM:true}).decode(bytes);
+      if (charset === "ascii" || charset === "us-ascii") {
+        if (bytes.some(b => b > 127)) throw new Error("Non-ASCII Gmail body bytes");
+        return bytes.toString("ascii");
+      }
+      if (charset === "iso-8859-1") return bytes.toString("latin1");
+      if (charset === "windows-1252") {
+        if (bytes.some(b => [0x81,0x8d,0x8f,0x90,0x9d].includes(b))) throw new Error("Undefined Gmail body character");
+        return new TextDecoder("windows-1252", {fatal:true}).decode(bytes);
+      }
+      throw new Error("Unsupported Gmail body encoding");
+    };
     // Prefer text/plain, fall back to text/html
     if (payload.mimeType === "text/plain" && payload.body?.data) {
-      return Buffer.from(payload.body.data, "base64url").toString("utf-8");
+      return decode(payload);
     }
 
     if (payload.mimeType === "text/html" && payload.body?.data) {
-      return Buffer.from(payload.body.data, "base64url").toString("utf-8");
+      return decode(payload);
     }
 
     // Multipart: recurse
@@ -1150,13 +1200,13 @@ export class GmailService {
       // Try text/plain first
       for (const part of payload.parts) {
         if (part.mimeType === "text/plain" && part.body?.data) {
-          return Buffer.from(part.body.data, "base64url").toString("utf-8");
+          return decode(part);
         }
       }
       // Fall back to text/html
       for (const part of payload.parts) {
         if (part.mimeType === "text/html" && part.body?.data) {
-          return Buffer.from(part.body.data, "base64url").toString("utf-8");
+          return decode(part);
         }
       }
       // Recurse into nested multipart
@@ -1167,6 +1217,33 @@ export class GmailService {
     }
 
     return "";
+  }
+
+  private extractAttachments(payload: gmail_v1.Schema$MessagePart) {
+    const attachments: EmailDetail["attachments"] = [];
+    const visit = (part: gmail_v1.Schema$MessagePart) => {
+      if (part.filename) {
+        const attachmentId = part.body?.attachmentId;
+        const size = part.body?.size;
+        if (
+          typeof attachmentId !== "string" || !attachmentId ||
+          !Number.isSafeInteger(size) || Number(size) <= 0
+        ) {
+          throw new Error(
+            "Malformed Gmail attachment evidence: attachment id and positive safe-integer size are required"
+          );
+        }
+        attachments.push({
+          filename: part.filename,
+          mime_type: part.mimeType ?? "application/octet-stream",
+          size: size as number,
+          attachment_id: attachmentId,
+        });
+      }
+      for (const child of part.parts ?? []) visit(child);
+    };
+    visit(payload);
+    return attachments;
   }
 
   private parseUnsubscribeLinks(
