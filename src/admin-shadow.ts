@@ -1,3 +1,4 @@
+import { legacyMimeParameters } from './mime-parameters.js';
 import { createHash } from 'node:crypto';
 
 // Provider injection is wired only to existing authenticated Google clients.
@@ -27,7 +28,7 @@ export function digest(x: any): string {
 
 // Preserve original body encoding and MIME metadata. Attachment data is neither
 // decoded, hashed nor returned. Ancestor fences propagate through nested parts.
-export function stripAttachments(root: any): any {
+export function stripAttachments(root: any, legacyParameters = false): any {
   let count = 0, bytes = 0;
   function visit(p: any, depth = 0, fenced = false): any {
     requireThat(p && typeof p === 'object' && !Array.isArray(p) && depth <= 20 && ++count <= 300, 'MIME bound');
@@ -46,7 +47,10 @@ export function stripAttachments(root: any): any {
         requireThat(!structuralHeaders.has(key), 'duplicate MIME structural header');
         structuralHeaders.add(key);
         // Comments and malformed tokens are ambiguous; never decode through them.
-        requireThat(!/[()]/.test(h.value), 'ambiguous MIME comment');
+        if (legacyParameters) {
+          const parameters = legacyMimeParameters(h.value);
+          blocked ||= parameters.has('name') || parameters.has('filename');
+        } else requireThat(!/[()]/.test(h.value), 'ambiguous MIME comment');
         blocked ||= /(?:^|;)\s*(?:name|filename)(?:\*[\d*]*)?\s*=/i.test(h.value);
         if (key === 'content-disposition') {
           const token = /^\s*([A-Za-z0-9!#$%&'*+.^_`|~-]+)\s*(?:;|$)/.exec(h.value);

@@ -1,5 +1,6 @@
-// Reconcile only Gmail's observed removal of a leading UTF-8 BOM. The strict
-// shadow parser stays unchanged. Original MIME bytes must prove every repair.
+import { legacyMimeParameters } from './mime-parameters.js';
+// Reconcile observed Gmail body transformations against exact original bytes.
+// The strict shadow parser stays unchanged. No size tolerance is admitted.
 export function reconcileOriginalBom(payload: any, encodedRaw: string): any {
   const fail = () => { throw new Error('Original MIME does not prove Gmail BOM normalization'); };
   if (typeof encodedRaw !== 'string' || encodedRaw.length > 6_000_000 || !/^[A-Za-z0-9_-]*={0,2}$/.test(encodedRaw)) fail();
@@ -36,10 +37,11 @@ export function reconcileOriginalBom(payload: any, encodedRaw: string): any {
       }
     }
     const fenced = (type: string, disposition: string): boolean => {
-      if (/[()]/.test(type + disposition)) fail();
+      const parameters = legacyMimeParameters(type || 'text/plain');
+      const dispositionParameters = disposition ? legacyMimeParameters(disposition) : new Map<string,string>();
       const token = disposition ? /^\s*([A-Za-z0-9!#$%&'*+.^_`|~-]+)\s*(?:;|$)/.exec(disposition) : null;
       if (disposition && !token) fail();
-      return /(?:^|;)\s*(?:name|filename)(?:\*[\d*]*)?\s*=/i.test(type + ';' + disposition) ||
+      return ['name','filename'].some(n => parameters.has(n) || dispositionParameters.has(n)) ||
         Boolean(token && token[1].toLowerCase() !== 'inline');
     };
     const rawFence = fenced(contentType, headers.get('content-disposition') ?? '');
@@ -51,9 +53,8 @@ export function reconcileOriginalBom(payload: any, encodedRaw: string): any {
     const parts = part.parts ?? [];
     if (!Array.isArray(parts)) fail();
     if (mime.startsWith('multipart/')) {
-      const matches = [...contentType.matchAll(/;\s*boundary\s*=\s*(?:"([^"\r\n]+)"|([^;\s]+))/gi)];
-      if (matches.length !== 1 || !parts.length) fail();
-      const boundary = matches[0][1] ?? matches[0][2];
+      const boundary = legacyMimeParameters(contentType).get('boundary');
+      if (!parts.length) fail();
       if (!boundary || boundary.length > 70) fail();
       const delimiter = '--' + boundary;
       const rows = body.split('\r\n');
@@ -76,7 +77,22 @@ export function reconcileOriginalBom(payload: any, encodedRaw: string): any {
     if (full.length === part.body.size) return part;
     const structuredType = (part.headers ?? []).filter((h: any) => h.name?.toLowerCase() === 'content-type');
     if (structuredType.length !== 1 || structuredType[0].value.replace(/\s+/g, ' ').trim().toLowerCase() !== contentType.replace(/\s+/g, ' ').trim().toLowerCase()) fail();
-    if (!/;\s*charset\s*=\s*"?utf-8"?\s*(?:;|$)/i.test(contentType) || headers.get('content-transfer-encoding')?.toLowerCase() !== 'base64') fail();
+    const charset = legacyMimeParameters(contentType).get('charset')?.toLowerCase();
+    if (charset === 'iso-8859-1' &&
+      headers.get('content-transfer-encoding')?.toLowerCase() === 'quoted-printable') {
+      // Gmail returned UTF-8 bytes while retaining the original charset/size.
+      // Restore proved original bytes so extractBody uses the original charset.
+      if (/[^\x09\x20-\x7e\r\n]/.test(body) || /\r(?!\n)|(?<!\r)\n/.test(body) ||
+        /=(?![A-Fa-f0-9]{2}|\r\n)/.test(body) ||
+        body.split('\r\n').some(line => line.length > 76 || /[ \t]$/.test(line))) fail();
+      const original = Buffer.from(body.replace(/=\r\n/g, '').replace(/=([A-Fa-f0-9]{2})/g,
+        (_, hex: string) => String.fromCharCode(parseInt(hex, 16))), 'latin1');
+      if (original.length !== part.body.size ||
+        !Buffer.from(original.toString('latin1'), 'utf8').equals(full)) fail();
+      repairs++;
+      return { ...part, body: { ...part.body, data: original.toString('base64url') } };
+    }
+    if (charset !== 'utf-8' || headers.get('content-transfer-encoding')?.toLowerCase() !== 'base64') fail();
     if (!/^[A-Za-z0-9+/=\r\n]*$/.test(body)) fail();
     const canonical = body.replace(/[\r\n]/g, '');
     const original = Buffer.from(canonical, 'base64');

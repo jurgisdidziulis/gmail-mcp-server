@@ -1,3 +1,4 @@
+import { legacyMimeParameters } from './mime-parameters.js';
 import { readAdminThreadShadow, stripAttachments } from "./admin-shadow.js";
 import { reconcileOriginalBom } from './gmail-bom-evidence.js';
 import { inspectSendRaw } from './delegated-send.js';
@@ -440,7 +441,7 @@ export class GmailService {
 
     let safePayload: gmail_v1.Schema$MessagePart;
     try {
-      safePayload = stripAttachments(res.data.payload);
+      safePayload = stripAttachments(res.data.payload, true);
     } catch (error) {
       if (!(error instanceof Error) || error.message !== 'Admin shadow: incomplete/noncanonical body') throw error;
       // Never tolerate arbitrary size discrepancies. Prove the single observed
@@ -452,7 +453,7 @@ export class GmailService {
         { timeout: 15000, maxContentLength: 8 * 1024 * 1024 });
       if (original.data.id !== messageId || original.data.threadId !== res.data.threadId ||
         original.data.historyId !== res.data.historyId || typeof original.data.raw !== 'string') throw error;
-      safePayload = stripAttachments(reconcileOriginalBom(res.data.payload, original.data.raw));
+      safePayload = stripAttachments(reconcileOriginalBom(res.data.payload, original.data.raw), true);
     }
     const headers: gmail_v1.Schema$MessagePartHeader[] = safePayload.headers ?? [];
     for (const name of ["from", "subject", "date", "message-id"]) {
@@ -1204,9 +1205,7 @@ export class GmailService {
     const decode = (part: gmail_v1.Schema$MessagePart): string => {
       const bytes = Buffer.from(part.body?.data ?? "", "base64url");
       const contentType = (part.headers ?? []).find(h => h.name?.toLowerCase() === "content-type")?.value ?? "";
-      const match = /(?:^|;)\s*charset\s*=\s*(?:"([^"]*)"|([^;\s]+))/i.exec(contentType);
-      if (/charset\s*=/i.test(contentType) && !match) throw new Error("Unresolved Gmail body encoding");
-      const charset = (match?.[1] ?? match?.[2] ?? "utf-8").toLowerCase().replace(/_/g, "-");
+      const charset = (legacyMimeParameters(contentType || part.mimeType || 'text/plain').get('charset') ?? 'utf-8').toLowerCase().replace(/_/g, '-');
       if (charset === "utf-8" || charset === "utf8") return new TextDecoder("utf-8", {fatal:true, ignoreBOM:true}).decode(bytes);
       if (charset === "ascii" || charset === "us-ascii") {
         if (bytes.some(b => b > 127)) throw new Error("Non-ASCII Gmail body bytes");
