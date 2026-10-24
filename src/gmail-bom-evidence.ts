@@ -1,3 +1,4 @@
+import { decodeBodyBytes } from './body-charset.js';
 import { legacyMimeParameters } from './mime-parameters.js';
 // Reconcile observed Gmail body transformations against exact original bytes.
 // The strict shadow parser stays unchanged. No size tolerance is admitted.
@@ -78,9 +79,9 @@ export function reconcileOriginalBom(payload: any, encodedRaw: string): any {
     const structuredType = (part.headers ?? []).filter((h: any) => h.name?.toLowerCase() === 'content-type');
     if (structuredType.length !== 1 || structuredType[0].value.replace(/\s+/g, ' ').trim().toLowerCase() !== contentType.replace(/\s+/g, ' ').trim().toLowerCase()) fail();
     const charset = legacyMimeParameters(contentType).get('charset')?.toLowerCase();
-    if (charset === 'iso-8859-1' &&
+    if ((charset === 'iso-8859-1' || charset === 'windows-1250') &&
       headers.get('content-transfer-encoding')?.toLowerCase() === 'quoted-printable') {
-      // Gmail returned UTF-8 bytes while retaining the original charset/size.
+      // Gmail returned UTF-8 bytes while retaining the proved source charset/size.
       // Restore proved original bytes so extractBody uses the original charset.
       if (/[^\x09\x20-\x7e\r\n]/.test(body) || /\r(?!\n)|(?<!\r)\n/.test(body) ||
         /=(?![A-Fa-f0-9]{2}|\r\n)/.test(body) ||
@@ -88,7 +89,7 @@ export function reconcileOriginalBom(payload: any, encodedRaw: string): any {
       const original = Buffer.from(body.replace(/=\r\n/g, '').replace(/=([A-Fa-f0-9]{2})/g,
         (_, hex: string) => String.fromCharCode(parseInt(hex, 16))), 'latin1');
       if (original.length !== part.body.size ||
-        !Buffer.from(original.toString('latin1'), 'utf8').equals(full)) fail();
+        !Buffer.from(decodeBodyBytes(original, charset!), 'utf8').equals(full)) fail();
       repairs++;
       return { ...part, body: { ...part.body, data: original.toString('base64url') } };
     }

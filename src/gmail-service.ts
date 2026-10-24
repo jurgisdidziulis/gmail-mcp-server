@@ -1,3 +1,4 @@
+import { decodeBodyBytes } from './body-charset.js';
 import { legacyMimeParameters } from './mime-parameters.js';
 import { readAdminThreadShadow, stripAttachments } from "./admin-shadow.js";
 import { reconcileOriginalBom } from './gmail-bom-evidence.js';
@@ -1206,17 +1207,7 @@ export class GmailService {
       const bytes = Buffer.from(part.body?.data ?? "", "base64url");
       const contentType = (part.headers ?? []).find(h => h.name?.toLowerCase() === "content-type")?.value ?? "";
       const charset = (legacyMimeParameters(contentType || part.mimeType || 'text/plain').get('charset') ?? 'utf-8').toLowerCase().replace(/_/g, '-');
-      if (charset === "utf-8" || charset === "utf8") return new TextDecoder("utf-8", {fatal:true, ignoreBOM:true}).decode(bytes);
-      if (charset === "ascii" || charset === "us-ascii") {
-        if (bytes.some(b => b > 127)) throw new Error("Non-ASCII Gmail body bytes");
-        return bytes.toString("ascii");
-      }
-      if (charset === "iso-8859-1") return bytes.toString("latin1");
-      if (charset === "windows-1252") {
-        if (bytes.some(b => [0x81,0x8d,0x8f,0x90,0x9d].includes(b))) throw new Error("Undefined Gmail body character");
-        return new TextDecoder("windows-1252", {fatal:true}).decode(bytes);
-      }
-      throw new Error("Unsupported Gmail body encoding");
+      return decodeBodyBytes(bytes, charset);
     };
     // Prefer text/plain, fall back to text/html
     if (payload.mimeType === "text/plain" && payload.body?.data) {
