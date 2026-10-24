@@ -356,7 +356,7 @@ export class GmailService {
     if (decodedToken && (decodedToken.query !== normalizedQuery || decodedToken.max_results !== requested)) {
       throw new Error("Gmail list page token does not match the requested query and bounds");
     }
-    if (pageToken) claimPageTokenReplay(pageToken, "list");
+    // Signed read cursors are retriable; only the durable consumer commits progress.
     const res = await this.gmail.users.messages.list({
       userId: "me",
       q: query || undefined,
@@ -579,7 +579,7 @@ export class GmailService {
     if (decodedToken && decodedToken.thread_id !== threadId) {
       throw new Error("Gmail thread page token does not belong to the requested thread");
     }
-    if (pageToken) claimPageTokenReplay(pageToken, "thread");
+    // Read retries still verify account, signature, thread identity and membership.
     let authoritativeAccount: string | null = null;
     if (this.expectedAccount) {
       const profile = await this.gmail.users.getProfile({ userId: "me" });

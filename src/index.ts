@@ -239,13 +239,8 @@ function createMcpServer(): McpServer {
             pagination_complete: page.paginationComplete,
           });
         } catch (err) {
-          if (isHostingerAccount(email, hostingerImapConfig)) throw err;
-          allResults.push({
-            account: email,
-            emails: [],
-            next_page_token: null,
-            pagination_complete: false,
-          });
+          // A failed read is an explicit MCP error, never an empty/incomplete page.
+          throw err;
         }
       }
 
@@ -693,13 +688,8 @@ function createMcpServer(): McpServer {
             pagination_complete: page.paginationComplete,
           });
         } catch (err) {
-          if (isHostingerAccount(email, hostingerImapConfig)) throw err;
-          allResults.push({
-            account: email,
-            emails: [],
-            next_page_token: null,
-            pagination_complete: false,
-          });
+          // A failed read is an explicit MCP error, never an empty/incomplete page.
+          throw err;
         }
       }
 
