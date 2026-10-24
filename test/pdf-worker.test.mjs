@@ -1,0 +1,10 @@
+import{test}from'node:test';import assert from'node:assert/strict';import fs from'node:fs';import{extractOriginalPdf}from'../dist/pdf/extract.js';
+const fixtures=JSON.parse(fs.readFileSync(new URL('./fixtures/pdf-synthetic.json',import.meta.url)));const bytes=name=>Buffer.from(fixtures[name],'base64');
+test('actual worker preserves ordered text pages and source/page hashes',async()=>{const r=await extractOriginalPdf(bytes('multi'));assert.equal(r.status,'complete',JSON.stringify(r));assert.equal(r.page_count,2);assert.match(r.pages[0].text,/Source page one/);assert.match(r.pages[1].text,/Source page two/);assert.match(r.source_sha256,/^[a-f0-9]{64}$/);});
+for(const name of ['image','mixed','blank'])test('visual evidence remains held '+name,async()=>{const r=await extractOriginalPdf(bytes(name));assert.equal(r.status,'incomplete_stop');assert.equal(r.reason,'needs_ocr_or_visual_review');});
+test('encrypted source requires password',async()=>assert.equal((await extractOriginalPdf(bytes('encrypted'))).reason,'password_required'));
+test('Lithuanian embedded font text is exact',async()=>{const r=await extractOriginalPdf(bytes('lithuanian'));assert.equal(r.status,'complete',JSON.stringify(r));assert.equal(r.pages[0].text.trim(),'ĄČĘĖĮŠŲŪŽ ąčęėįšųūž');});
+test('malformed/truncated source never completes',async()=>{for(const b of [Buffer.from('not PDF'),bytes('multi').subarray(0,200)])assert.equal((await extractOriginalPdf(b)).status,'incomplete_stop');});
+test('input and page caps are enforced',async()=>{assert.equal((await extractOriginalPdf(Buffer.alloc(8*1024*1024+1))).reason,'byte_limit');assert.equal((await extractOriginalPdf(bytes('multi'),1)).reason,'page_limit');});
+test('text limit cannot admit partial output',async()=>assert.equal((await extractOriginalPdf(bytes('multi'),50,{maxText:1})).reason,'text_limit'));
+test('hard deadline terminates parser',async()=>assert.equal((await extractOriginalPdf(bytes('multi'),50,{timeout:1})).reason,'timeout'));

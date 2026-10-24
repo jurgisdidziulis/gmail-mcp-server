@@ -201,6 +201,7 @@ function decodeListPageToken(token: string, key: string, accountBinding: string)
 }
 
 export interface EmailDetail {
+  historyId?: string | null;
   id: string;
   threadId: string;
   subject: string;
@@ -481,6 +482,7 @@ export class GmailService {
     return {
       id: res.data.id!,
       threadId: res.data.threadId!,
+      historyId: res.data.historyId,
       subject: hdr("Subject"),
       from: hdr("From"),
       to: hdr("To"),
@@ -497,6 +499,40 @@ export class GmailService {
   // -----------------------------------------------------------------------
   // get_attachment — source-bound original bytes for one Gmail attachment
   // -----------------------------------------------------------------------
+
+  // Dedicated document-evidence lane; ordinary body/shadow reads never call it.
+  async getDocumentAttachment(input: {messageId:string;threadId:string;historyId:string;attachment:{attachment_id:string;filename:string;mime_type:string;size:number}}) {
+    if (!this.expectedAccount || !input.historyId || typeof input.attachment.attachment_id !== 'string' || !input.attachment.attachment_id || !Number.isSafeInteger(input.attachment.size) ||
+      input.attachment.size <= 0 || input.attachment.size > 8*1024*1024 ||
+      (input.attachment.mime_type.toLowerCase() !== 'application/pdf' && !input.attachment.filename.toLowerCase().endsWith('.pdf'))) throw Error('PDF source metadata/bound');
+    const profile=await this.gmail.users.getProfile({userId:'me'});
+    if(profile.data.emailAddress?.toLowerCase()!==this.expectedAccount.toLowerCase())throw Error('PDF account identity');
+    const read=async()=>{
+      const response=await this.gmail.users.messages.get({userId:'me',id:input.messageId,format:'full'},{timeout:15000,maxContentLength:8*1024*1024});
+      const m=response.data;
+      if(m.id!==input.messageId||m.threadId!==input.threadId||m.historyId!==input.historyId||!m.payload)throw Error('PDF source identity/history changed');
+      const matches:Array<{part:gmail_v1.Schema$MessagePart;path:string}>=[];const idPaths:string[]=[];let count=0;
+      const walk=(part:gmail_v1.Schema$MessagePart,path='root',depth=0)=>{
+        if(depth>20||++count>300)throw Error('PDF MIME bound');
+        if(part.filename===input.attachment.filename)matches.push({part,path});
+        if(part.body?.attachmentId===input.attachment.attachment_id)idPaths.push(path);
+        for(const [i,child]of(part.parts??[]).entries())walk(child,path+'.'+i,depth+1);
+      };walk(m.payload);
+      if(matches.length!==1||idPaths.length>1||(idPaths.length===1&&idPaths[0]!==matches[0].path))throw Error('PDF filename/ID absent, conflicting or ambiguous');
+      const {part,path}=matches[0];
+      if(part.mimeType!==input.attachment.mime_type||part.body?.size!==input.attachment.size||!part.body?.attachmentId)throw Error('PDF source metadata changed');
+      return {attachmentId:part.body.attachmentId,path,metadata:{filename:part.filename,mime_type:part.mimeType,size:part.body.size,path}};
+    };
+    const before=await read();
+    const response=await this.gmail.users.messages.attachments.get({userId:'me',messageId:input.messageId,id:before.attachmentId},{timeout:15000,maxContentLength:12*1024*1024});
+    const encoded=response.data.data;
+    if(typeof encoded!=='string'||encoded.length>12*1024*1024||!/^[A-Za-z0-9_-]*={0,2}$/.test(encoded))throw Error('PDF byte encoding/bound');
+    const bytes=Buffer.from(encoded,'base64url');
+    if(bytes.length!==input.attachment.size||bytes.toString('base64url')!==encoded.replace(/=+$/,''))throw Error('PDF original byte size/canonical proof');
+    const after=await read();
+    if(JSON.stringify(before.metadata)!==JSON.stringify(after.metadata))throw Error('PDF source part changed');
+    return {bytes,source:{account:this.expectedAccount,message_id:input.messageId,thread_id:input.threadId,history_id:input.historyId,attachment_id:before.attachmentId,source_part_path:before.path,filename:input.attachment.filename,mime_type:input.attachment.mime_type,byte_size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}};
+  }
 
   async getAttachment(messageId: string, attachmentId: string, expectedFilename?: string) {
     const message = await this.gmail.users.messages.get({

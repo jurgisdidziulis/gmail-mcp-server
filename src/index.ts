@@ -388,7 +388,7 @@ function createMcpServer(): McpServer {
     {
       account: z.string().describe("Email address of the account this message belongs to"),
       message_id: z.string().min(1).describe("Anchor Gmail message ID"),
-      max_pdf_pages: z.number().min(1).max(200).default(50),
+      max_pdf_pages: z.number().int().min(1).max(200).default(50),
     },
     async ({ account, message_id, max_pdf_pages }) => {
       const resolvedAccount = resolveSingleMailAccount(
@@ -398,7 +398,7 @@ function createMcpServer(): McpServer {
       );
       const service = await getReadServiceForAccount(resolvedAccount);
       const evidence = await readThreadEvidence(service, resolvedAccount, message_id,
-        isHostingerAccount(resolvedAccount, hostingerImapConfig) ? "hostinger-imap" : "gmail");
+        isHostingerAccount(resolvedAccount, hostingerImapConfig) ? "hostinger-imap" : "gmail", max_pdf_pages);
       return {
         content: [{ type: "text" as const, text: JSON.stringify(evidence, null, 2) }],
       };
