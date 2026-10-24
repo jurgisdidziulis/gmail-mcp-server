@@ -79,15 +79,23 @@ export function reconcileOriginalBom(payload: any, encodedRaw: string): any {
     const structuredType = (part.headers ?? []).filter((h: any) => h.name?.toLowerCase() === 'content-type');
     if (structuredType.length !== 1 || structuredType[0].value.replace(/\s+/g, ' ').trim().toLowerCase() !== contentType.replace(/\s+/g, ' ').trim().toLowerCase()) fail();
     const charset = legacyMimeParameters(contentType).get('charset')?.toLowerCase();
-    if ((charset === 'iso-8859-1' || charset === 'windows-1250') &&
-      headers.get('content-transfer-encoding')?.toLowerCase() === 'quoted-printable') {
-      // Gmail returned UTF-8 bytes while retaining the proved source charset/size.
-      // Restore proved original bytes so extractBody uses the original charset.
-      if (/[^\x09\x20-\x7e\r\n]/.test(body) || /\r(?!\n)|(?<!\r)\n/.test(body) ||
-        /=(?![A-Fa-f0-9]{2}|\r\n)/.test(body) ||
-        body.split('\r\n').some(line => line.length > 76 || /[ \t]$/.test(line))) fail();
-      const original = Buffer.from(body.replace(/=\r\n/g, '').replace(/=([A-Fa-f0-9]{2})/g,
-        (_, hex: string) => String.fromCharCode(parseInt(hex, 16))), 'latin1');
+    const transfer = headers.get('content-transfer-encoding')?.toLowerCase();
+    if (['iso-8859-1', 'windows-1250', 'windows-1252'].includes(charset ?? '') &&
+      (transfer === 'quoted-printable' || transfer === '8bit')) {
+      // Require exact original bytes and exact declared-charset transformation.
+      // No guessed size tolerance or fallback charset is permitted.
+      let original: Buffer;
+      if (transfer === 'quoted-printable') {
+        if (/[^\x09\x20-\x7e\r\n]/.test(body) || /\r(?!\n)|(?<!\r)\n/.test(body) ||
+          /=(?![A-Fa-f0-9]{2}|\r\n)/.test(body) ||
+          body.split('\r\n').some(line => line.length > 76 || /[ \t]$/.test(line))) fail();
+        original = Buffer.from(body.replace(/=\r\n/g, '').replace(/=([A-Fa-f0-9]{2})/g,
+          (_, hex: string) => String.fromCharCode(parseInt(hex, 16))), 'latin1');
+      } else {
+        if (/\x00|\r(?!\n)|(?<!\r)\n/.test(body) ||
+          body.split('\r\n').some(line => line.length > 998)) fail();
+        original = Buffer.from(body, 'latin1');
+      }
       if (original.length !== part.body.size ||
         !Buffer.from(decodeBodyBytes(original, charset!), 'utf8').equals(full)) fail();
       repairs++;
