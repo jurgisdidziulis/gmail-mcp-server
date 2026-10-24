@@ -58,12 +58,14 @@ export async function readThreadEvidence(service: {
       if(totalText>500000){pdfs.push(incomplete('pdf_thread_text_limit'));continue;}
       pdfs.push({...attachment,...extracted,source,text,text_sha256:createHash('sha256').update(text).digest('hex'),is_pdf:true,status:'complete',error:null});
     }catch(error:any){
-      const code = error?.code ?? error?.response?.status;
+      const code = typeof error?.response?.status === 'number' ? error.response.status :
+        typeof error?.code === 'number' ? error.code : undefined;
+      const transportCode = typeof error?.code === 'string' ? error.code : undefined;
       const reasons = error?.response?.data?.error?.errors;
       const explicitQuota = code === 429 || (code === 403 && Array.isArray(reasons) && reasons.some((r:any) => ['rateLimitExceeded','userRateLimitExceeded'].includes(r?.reason)));
       if (explicitQuota) providerRateLimited=true;
       const failureCode = explicitQuota ? 'provider_rate_limit' : code === 403 ? 'provider_forbidden' :
-        code === 404 ? 'provider_not_found' : error?.name === 'AbortError' || code === 'ETIMEDOUT' ? 'source_timeout' :
+        code === 404 ? 'provider_not_found' : error?.name === 'AbortError' || transportCode === 'ETIMEDOUT' ? 'source_timeout' :
         failureStage === 'source_binding' ? 'source_binding_rejected' :
         failureStage === 'extractor' ? 'extractor_exception' : 'source_fetch_failed';
       pdfs.push({...incomplete('pdf_source_or_extraction_failed'),failure_stage:failureStage,failure_code:failureCode});
