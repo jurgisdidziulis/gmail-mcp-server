@@ -58,7 +58,7 @@ export async function readThreadEvidence(service: {
       if(totalText>500000){pdfs.push(incomplete('pdf_thread_text_limit'));continue;}
       pdfs.push({...attachment,...extracted,source,text,text_sha256:createHash('sha256').update(text).digest('hex'),is_pdf:true,status:'complete',error:null});
     }catch(error:any){
-      const code = typeof error?.code === 'number' ? error.code : error?.response?.status;
+      const code = error?.code ?? error?.response?.status;
       const reasons = error?.response?.data?.error?.errors;
       const explicitQuota = code === 429 || (code === 403 && Array.isArray(reasons) && reasons.some((r:any) => ['rateLimitExceeded','userRateLimitExceeded'].includes(r?.reason)));
       if (explicitQuota) providerRateLimited=true;
