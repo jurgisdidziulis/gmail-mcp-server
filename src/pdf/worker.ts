@@ -17,11 +17,13 @@ try {
  const task=getDocument({data:new Uint8Array(Buffer.from(req.data,'base64')),standardFontDataUrl:join(root,'standard_fonts/'),cMapUrl:join(root,'cmaps/'),cMapPacked:true,wasmUrl:join(root,'wasm/'),enableXfa:false,useSystemFonts:false,disableFontFace:true,isOffscreenCanvasSupported:false,useWorkerFetch:false,stopAtErrors:true});
  const doc=await task.promise;
  if(doc.numPages<1||doc.numPages>req.maxPages){stop('page_limit');process.exit(0);}
+ if(await doc.getFieldObjects()){stop('annotations_or_forms_require_review');process.exit(0);}
  if(await doc.getJSActions()){stop('embedded_actions');process.exit(0);}
  const imageOps=new Set([OPS.paintImageXObject,OPS.paintInlineImageXObject,OPS.paintImageMaskXObject,OPS.paintImageMaskXObjectGroup,OPS.paintImageXObjectRepeat,OPS.paintInlineImageXObjectGroup]);
  const pages=[];let total=0;
  for(let n=1;n<=doc.numPages;n++) {
   const page=await doc.getPage(n);
+  if((await page.getAnnotations({intent:'any'})).length){stop('annotations_or_forms_require_review');process.exit(0);}
   if(await page.getJSActions()){stop('embedded_actions');process.exit(0);}
   const ops=await page.getOperatorList();
   if(ops.fnArray.some((op:number)=>imageOps.has(op))){stop('needs_ocr_or_visual_review');process.exit(0);}

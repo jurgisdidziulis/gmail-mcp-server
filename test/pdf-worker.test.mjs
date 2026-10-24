@@ -8,3 +8,4 @@ test('malformed/truncated source never completes',async()=>{for(const b of [Buff
 test('input and page caps are enforced',async()=>{assert.equal((await extractOriginalPdf(Buffer.alloc(8*1024*1024+1))).reason,'byte_limit');assert.equal((await extractOriginalPdf(bytes('multi'),1)).reason,'page_limit');});
 test('text limit cannot admit partial output',async()=>assert.equal((await extractOriginalPdf(bytes('multi'),50,{maxText:1})).reason,'text_limit'));
 test('hard deadline terminates parser',async()=>assert.equal((await extractOriginalPdf(bytes('multi'),50,{timeout:1})).reason,'timeout'));
+for(const name of ['note','form'])test('material annotation/widget is never omitted from a complete result '+name,async()=>{const r=await extractOriginalPdf(bytes(name));assert.equal(r.status,'incomplete_stop');assert.equal(r.reason,'annotations_or_forms_require_review');});
