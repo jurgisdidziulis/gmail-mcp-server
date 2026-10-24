@@ -33,9 +33,10 @@ export async function readThreadEvidence(service: {
     if (typeof a.filename !== 'string' || !a.filename || typeof mime !== 'string' || !mime) throw new Error('Attachment metadata malformed');
     attachments.push({source_message_id:m.id,filename:a.filename,mime_type:mime,is_pdf:mime.toLowerCase()==='application/pdf'||a.filename.toLowerCase().endsWith('.pdf')});
   }
-  const pdfs:any[]=[];let totalBytes=0,totalText=0;
+  const pdfs:any[]=[];let totalBytes=0,totalText=0;let providerRateLimited=false;
   for(const attachment of attachments.filter(a=>a.is_pdf)) {
     const incomplete=(error:string)=>({...attachment,status:'incomplete',error});
+    if(providerRateLimited){pdfs.push({...incomplete('provider_rate_limit'),failure_stage:'source_fetch',failure_code:'provider_rate_limit'});continue;}
     if(process.env.PDF_DOCUMENT_EVIDENCE_ENABLED!=='true'){pdfs.push(incomplete('pdf_extraction_not_activated'));continue;}
     if(provider!=='gmail'||!service.getDocumentAttachment){pdfs.push(incomplete('pdf_provider_unsupported'));continue;}
     if(pdfs.length>=10){pdfs.push(incomplete('pdf_count_limit'));continue;}
@@ -58,7 +59,10 @@ export async function readThreadEvidence(service: {
       pdfs.push({...attachment,...extracted,source,text,text_sha256:createHash('sha256').update(text).digest('hex'),is_pdf:true,status:'complete',error:null});
     }catch(error:any){
       const code = typeof error?.code === 'number' ? error.code : error?.response?.status;
-      const failureCode = code === 429 ? 'provider_rate_limit' : code === 403 ? 'provider_forbidden' :
+      const reasons = error?.response?.data?.error?.errors;
+      const explicitQuota = code === 429 || (code === 403 && Array.isArray(reasons) && reasons.some((r:any) => ['rateLimitExceeded','userRateLimitExceeded'].includes(r?.reason)));
+      if (explicitQuota) providerRateLimited=true;
+      const failureCode = explicitQuota ? 'provider_rate_limit' : code === 403 ? 'provider_forbidden' :
         code === 404 ? 'provider_not_found' : error?.name === 'AbortError' || code === 'ETIMEDOUT' ? 'source_timeout' :
         failureStage === 'source_binding' ? 'source_binding_rejected' :
         failureStage === 'extractor' ? 'extractor_exception' : 'source_fetch_failed';
