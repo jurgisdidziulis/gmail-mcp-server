@@ -82,13 +82,16 @@ export function reconcileOriginalBom(payload: any, encodedRaw: string): any {
     const transfer = headers.get('content-transfer-encoding')?.toLowerCase();
     if (['iso-8859-1', 'windows-1250', 'windows-1252'].includes(charset ?? '') &&
       (transfer === 'quoted-printable' || transfer === '8bit')) {
+      // Provider compatibility mode: legacy QP preserves literal terminal SP/HT.
+      // This is not RFC 2045 whitespace normalization. Accept only exact source
+      // decoded length AND exact charset-transformed provider bytes below.
       // Require exact original bytes and exact declared-charset transformation.
       // No guessed size tolerance or fallback charset is permitted.
       let original: Buffer;
       if (transfer === 'quoted-printable') {
         if (/[^\x09\x20-\x7e\r\n]/.test(body) || /\r(?!\n)|(?<!\r)\n/.test(body) ||
           /=(?![A-Fa-f0-9]{2}|\r\n)/.test(body) ||
-          body.split('\r\n').some(line => line.length > 76 || /[ \t]$/.test(line))) fail();
+          body.split('\r\n').some(line => line.length > 76)) fail();
         original = Buffer.from(body.replace(/=\r\n/g, '').replace(/=([A-Fa-f0-9]{2})/g,
           (_, hex: string) => String.fromCharCode(parseInt(hex, 16))), 'latin1');
       } else {
