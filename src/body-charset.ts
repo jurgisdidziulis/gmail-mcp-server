@@ -7,7 +7,7 @@ export function decodeBodyBytes(bytes: Buffer, charset: string): string {
     return bytes.toString('ascii');
   }
   if (name === 'iso-8859-1') return bytes.toString('latin1');
-  if (name === 'windows-1252' || name === 'windows-1250') {
+  if (name === 'windows-1252' || name === 'windows-1250' || name === 'windows-1257') {
     const text = new TextDecoder(name, {fatal:true,ignoreBOM:true}).decode(bytes);
     if (/[\u0080-\u009f\ufffd]/.test(text)) throw new Error('Undefined Gmail body character');
     return text;

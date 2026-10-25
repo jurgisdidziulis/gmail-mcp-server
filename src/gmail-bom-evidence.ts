@@ -80,7 +80,7 @@ export function reconcileOriginalBom(payload: any, encodedRaw: string): any {
     if (structuredType.length !== 1 || structuredType[0].value.replace(/\s+/g, ' ').trim().toLowerCase() !== contentType.replace(/\s+/g, ' ').trim().toLowerCase()) fail();
     const charset = legacyMimeParameters(contentType).get('charset')?.toLowerCase();
     const transfer = headers.get('content-transfer-encoding')?.toLowerCase();
-    if (['iso-8859-1', 'windows-1250', 'windows-1252'].includes(charset ?? '') &&
+    if (['iso-8859-1', 'windows-1250', 'windows-1252', 'windows-1257'].includes(charset ?? '') &&
       (transfer === 'quoted-printable' || transfer === '8bit')) {
       // Provider compatibility mode: legacy QP preserves literal terminal SP/HT.
       // This is not RFC 2045 whitespace normalization. Accept only exact source
