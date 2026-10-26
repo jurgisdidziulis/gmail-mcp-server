@@ -53,7 +53,7 @@ export async function readThreadEvidence(service: {
       totalBytes+=bytes.length;if(totalBytes>16*1024*1024){pdfs.push(incomplete('pdf_thread_byte_limit'));continue;}
       failureStage = 'extractor';
       const extracted=await extractOriginalPdf(bytes,maxPdfPages);
-      if(extracted.status!=='complete'){pdfs.push({...incomplete(extracted.reason??'pdf_extraction_failed'),source,...(extracted.note_review?{note_review:extracted.note_review}:{})});continue;}
+      if(extracted.status!=='complete'){pdfs.push({...incomplete(extracted.reason??'pdf_extraction_failed'),source,...(extracted.note_review?{note_review:extracted.note_review}:{}),...(extracted.form_review?{form_review:extracted.form_review}:{})});continue;}
       const text=extracted.pages.map((p:any)=>p.text).join('\n\n');totalText+=text.length;
       if(totalText>500000){pdfs.push(incomplete('pdf_thread_text_limit'));continue;}
       pdfs.push({...attachment,...extracted,source,text,text_sha256:createHash('sha256').update(text).digest('hex'),is_pdf:true,status:'complete',error:null});
