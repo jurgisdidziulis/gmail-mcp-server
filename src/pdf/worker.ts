@@ -1,4 +1,5 @@
 import './network-deny.js';
+import {collectTextNotes} from './note-review.js';
 import {createHash} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {dirname,join} from 'node:path';
@@ -17,8 +18,16 @@ try {
  const task=getDocument({data:new Uint8Array(Buffer.from(req.data,'base64')),standardFontDataUrl:join(root,'standard_fonts/'),cMapUrl:join(root,'cmaps/'),cMapPacked:true,wasmUrl:join(root,'wasm/'),enableXfa:false,useSystemFonts:false,disableFontFace:true,isOffscreenCanvasSupported:false,useWorkerFetch:false,stopAtErrors:true});
  const doc=await task.promise;
  if(doc.numPages<1||doc.numPages>req.maxPages){stop('page_limit');process.exit(0);}
- if(await doc.getFieldObjects()){stop('annotations_or_forms_require_review');process.exit(0);}
  if(await doc.getJSActions()){stop('embedded_actions');process.exit(0);}
+ if(await doc.getFieldObjects()){stop('annotations_or_forms_require_review');process.exit(0);}
+ const annotationPages=[];let hasAnnotations=false;
+ for(let n=1;n<=doc.numPages;n++){const page=await doc.getPage(n);if(await page.getJSActions()){stop('embedded_actions');process.exit(0);}const annotations=await page.getAnnotations({intent:'any'});hasAnnotations ||= annotations.length>0;annotationPages.push({page:n,annotations});}
+ if(hasAnnotations){
+  let review;try{review=collectTextNotes(annotationPages);}catch(e:any){stop(e.message==='embedded_actions'?'embedded_actions':e.message==='note_review_limit'?'note_review_limit':'note_review_contract');process.exit(0);}
+  if(warnings.length){stop('parser_warning');process.exit(0);}
+  await task.destroy();
+  process.stdout.write(JSON.stringify({status:'incomplete_stop',reason:'annotations_or_forms_require_review',extractor:'pdfjs-dist',version:'6.2.108',...(review.notes.length?{note_review:review}:{})}));process.exit(0);
+ }
  const imageOps=new Set([OPS.paintImageXObject,OPS.paintInlineImageXObject,OPS.paintImageMaskXObject,OPS.paintImageMaskXObjectGroup,OPS.paintImageXObjectRepeat,OPS.paintInlineImageXObjectGroup]);
  const pages=[];let total=0;
  for(let n=1;n<=doc.numPages;n++) {
