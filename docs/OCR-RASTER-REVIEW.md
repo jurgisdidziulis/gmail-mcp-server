@@ -29,8 +29,11 @@ build, checks the fixed model path and removes package indexes. The existing
 Node 22.23.4 base is retained. Package revisions are resolved by Debian at build
 time; per-result engine/model hashes identify the actual binaries, rather than
 claiming immutable package versions. The optional BuildKit `proxy_ca` certificate
-mount supports managed builds without retaining that certificate in image layers
-or disabling npm TLS verification. The build context excludes local data and keys.
+mount is not supported by the Railway builder. The production Dockerfile uses
+ordinary `npm ci --strict-ssl=true` with builder-provided trust. Managed local
+validation that requires a session CA must use a temporary local Dockerfile with
+the CA mount; never commit that local-only mount to the production recipe.
+The build context excludes local data and keys.
 
 Reproduce the container regression check after building the image:
 

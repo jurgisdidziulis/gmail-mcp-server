@@ -11,9 +11,7 @@ WORKDIR /app
 
 # Install all dependencies (including devDependencies for build)
 COPY package.json package-lock.json* ./
-RUN --mount=type=secret,id=proxy_ca \
-    if [ -f /run/secrets/proxy_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/proxy_ca; fi; \
-    npm ci --strict-ssl=true
+RUN npm ci --strict-ssl=true
 
 COPY tsconfig.json ./
 COPY src/ ./src/
