@@ -389,8 +389,9 @@ function createMcpServer(): McpServer {
       account: z.string().describe("Email address of the account this message belongs to"),
       message_id: z.string().min(1).describe("Anchor Gmail message ID"),
       max_pdf_pages: z.number().int().min(1).max(200).default(50),
+      ocr_review: z.boolean().default(false).describe("Request bounded English OCR review for scanned PDFs when server-enabled; never grants complete or accepted evidence"),
     },
-    async ({ account, message_id, max_pdf_pages }) => {
+    async ({ account, message_id, max_pdf_pages, ocr_review }) => {
       const resolvedAccount = resolveSingleMailAccount(
         account,
         tokenStore.listAccounts(),
@@ -398,7 +399,7 @@ function createMcpServer(): McpServer {
       );
       const service = await getReadServiceForAccount(resolvedAccount);
       const evidence = await readThreadEvidence(service, resolvedAccount, message_id,
-        isHostingerAccount(resolvedAccount, hostingerImapConfig) ? "hostinger-imap" : "gmail", max_pdf_pages);
+        isHostingerAccount(resolvedAccount, hostingerImapConfig) ? "hostinger-imap" : "gmail", max_pdf_pages, {ocrReview:ocr_review});
       return {
         content: [{ type: "text" as const, text: JSON.stringify(evidence, null, 2) }],
       };

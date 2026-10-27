@@ -1,11 +1,14 @@
 import {extractOriginalPdf} from './pdf/extract.js';
+import {reviewPdfOcr} from './pdf/ocr-pdf-review.js';
 import {createHash} from 'node:crypto';
 /** Provider-backed evidence. Metadata never substitutes for extracted PDF content. */
 export async function readThreadEvidence(service: {
   getEmail(id: string): Promise<any>;
   getThread(id: string, limit: number, token?: string): Promise<any>;
   getDocumentAttachment?(input:any):Promise<any>;
-}, account: string, messageId: string, provider: 'gmail' | 'hostinger-imap', maxPdfPages=50) {
+}, account: string, messageId: string, provider: 'gmail' | 'hostinger-imap', maxPdfPages=50, options:{ocrReview?:boolean}={}) {
+  const ocrEnabled=options.ocrReview===true&&process.env.PDF_OCR_REVIEW_ENABLED==='true';
+  let ocrAttempts=0;
   const anchor = await service.getEmail(messageId);
   if (anchor?.id !== messageId || typeof anchor.threadId !== 'string' || !anchor.threadId) throw new Error('Anchor identity mismatch');
   const messages: any[] = [], seen = new Set<string>(), tokens = new Set<string>();
@@ -48,12 +51,22 @@ export async function readThreadEvidence(service: {
     try {
       const original=await service.getDocumentAttachment({messageId:message.id,threadId:message.threadId,historyId:message.historyId,attachment:matches[0]});
       failureStage = 'source_binding';
-      const {bytes,source}=original;
+      // Snapshot provider-owned data before any asynchronous extraction/review.
+      const bytes=Buffer.isBuffer(original.bytes)?Buffer.from(original.bytes):original.bytes;
+      const source={...original.source};
       if(!Buffer.isBuffer(bytes)||bytes.length!==matches[0].size||typeof source.attachment_id!=='string'||!source.attachment_id||typeof source.source_part_path!=='string'||!/^root(?:\.\d+)*$/.test(source.source_part_path)||source.account!==account||source.message_id!==message.id||source.thread_id!==message.threadId||source.history_id!==message.historyId||source.filename!==attachment.filename||source.mime_type!==attachment.mime_type||source.byte_size!==bytes.length||source.sha256!==createHash('sha256').update(bytes).digest('hex'))throw Error('source binding');
       totalBytes+=bytes.length;if(totalBytes>16*1024*1024){pdfs.push(incomplete('pdf_thread_byte_limit'));continue;}
       failureStage = 'extractor';
       const extracted=await extractOriginalPdf(bytes,maxPdfPages);
-      if(extracted.status!=='complete'){pdfs.push({...incomplete(extracted.reason??'pdf_extraction_failed'),source,...(extracted.note_review?{note_review:extracted.note_review}:{}),...(extracted.form_review?{form_review:extracted.form_review}:{})});continue;}
+      if(extracted.status!=='complete'){
+        let ocrReview;
+        if(ocrEnabled&&extracted.reason==='needs_ocr_or_visual_review'){
+          // One bounded OCR attempt per thread; never promote review text to complete evidence.
+          ocrReview=ocrAttempts++===0?await reviewPdfOcr(bytes,Math.min(maxPdfPages,3)):
+            {status:'incomplete_stop',reason:'ocr_thread_attempt_limit',review_only:true,extraction_complete:false};
+        }
+        pdfs.push({...incomplete(extracted.reason??'pdf_extraction_failed'),source,...(extracted.note_review?{note_review:extracted.note_review}:{}),...(extracted.form_review?{form_review:extracted.form_review}:{}),...(ocrReview?{ocr_review:ocrReview}:{})});continue;
+      }
       const text=extracted.pages.map((p:any)=>p.text).join('\n\n');totalText+=text.length;
       if(totalText>500000){pdfs.push(incomplete('pdf_thread_text_limit'));continue;}
       pdfs.push({...attachment,...extracted,source,text,text_sha256:createHash('sha256').update(text).digest('hex'),is_pdf:true,status:'complete',error:null});
