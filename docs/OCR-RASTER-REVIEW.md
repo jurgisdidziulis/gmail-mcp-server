@@ -56,6 +56,14 @@ attachment receives `ocr_thread_attempt_limit`; it never silently disappears.
 Both activation gates are required; deploying this code alone does not enable
 OCR on routine mail reads. A locally built image is not production acceptance.
 
+The release can run `node dist/pdf/ocr-selftest.js` as its pre-deploy command.
+It uses an embedded, generated image PDF and an in-memory provider fixture to
+exercise the real thread-evidence/render/OCR path. It makes no provider calls or
+business writes and logs only PASS/FAIL and synthetic/runtime asset hashes. It
+also requires the evidence to remain incomplete. Review flags are set only in
+this short-lived check process, leaving service activation unchanged. Failure
+exits nonzero, preventing the new release from passing pre-deploy acceptance.
+
 Validation uses synthetic rasters and the actual installed Tesseract engine;
 it does not refetch any private original document or replace the earlier PDF
 worker acceptance. English-only behavior must not be advertised as Lithuanian
