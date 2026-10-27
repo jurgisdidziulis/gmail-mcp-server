@@ -24,10 +24,26 @@ render surfaces stop before canvas allocation; no partial page list is returned.
 The existing normal extraction path never selects this rendering mode or invokes
 OCR automatically. Text PDFs are not routed through OCR.
 
-Next integration must install the engine/model through the reviewed image build
-and explicitly expose review-only results through the existing evidence path.
-Neither the live Docker dependencies nor automatic fallback behavior changes in
-this candidate. Do not mark production OCR ready from these component tests.
+The candidate Docker image installs Debian's Tesseract and English model during
+build, checks the fixed model path and removes package indexes. The existing
+Node 22.23.4 base is retained. Package revisions are resolved by Debian at build
+time; per-result engine/model hashes identify the actual binaries, rather than
+claiming immutable package versions. The optional BuildKit `proxy_ca` certificate
+mount supports managed builds without retaining that certificate in image layers
+or disabling npm TLS verification. The build context excludes local data and keys.
+
+Reproduce the container regression check after building the image:
+
+```sh
+docker run --rm --network=none --mount type=bind,src="$PWD/test",dst=/app/test,readonly \
+  office-gmail-ocr-review:20261027 node --test --test-concurrency=1 \
+  test/ocr-pdf-review.test.mjs test/ocr-review.test.mjs test/pdf-worker.test.mjs \
+  test/pdf-note-review.test.mjs test/pdf-form-review.test.mjs
+```
+
+Next integration must explicitly expose review-only results through the existing
+evidence path. Automatic fallback behavior remains unchanged. A locally built
+image is not a deployed runtime or production OCR acceptance.
 
 Validation uses synthetic rasters and the actual installed Tesseract engine;
 it does not refetch any private original document or replace the earlier PDF

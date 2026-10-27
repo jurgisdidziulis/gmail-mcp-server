@@ -1,10 +1,19 @@
+# syntax=docker/dockerfile:1
 FROM node:22.23.4-slim
+
+# Fixed local OCR runtime; English only. No runtime model downloads.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+    && test -r /usr/share/tesseract-ocr/5/tessdata/eng.traineddata \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Install all dependencies (including devDependencies for build)
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -f /run/secrets/proxy_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/proxy_ca; fi; \
+    npm ci --strict-ssl=true
 
 COPY tsconfig.json ./
 COPY src/ ./src/
