@@ -37,13 +37,24 @@ Reproduce the container regression check after building the image:
 ```sh
 docker run --rm --network=none --mount type=bind,src="$PWD/test",dst=/app/test,readonly \
   office-gmail-ocr-review:20261027 node --test --test-concurrency=1 \
+  test/ocr-evidence.test.mjs test/pdf-evidence.test.mjs \
   test/ocr-pdf-review.test.mjs test/ocr-review.test.mjs test/pdf-worker.test.mjs \
   test/pdf-note-review.test.mjs test/pdf-form-review.test.mjs
 ```
 
-Next integration must explicitly expose review-only results through the existing
-evidence path. Automatic fallback behavior remains unchanged. A locally built
-image is not a deployed runtime or production OCR acceptance.
+The existing `get_thread_evidence` tool now accepts `ocr_review: true` (default
+false). It only runs OCR when the server also sets `PDF_OCR_REVIEW_ENABLED=true`
+and normal PDF evidence is enabled. The original attachment must first pass the
+existing provider/source/hash binding and be held for visual/OCR review. Text,
+forms, annotations and other failure paths never invoke OCR. Only one attachment
+per thread can enter OCR, with the renderer's existing three-page cap.
+
+OCR output appears only in `pdfs[].ocr_review`. The PDF remains incomplete, its
+original hold/error is retained, and no top-level accepted `text` or `pages` are
+added. Overall success and PDF completeness remain false. A second eligible
+attachment receives `ocr_thread_attempt_limit`; it never silently disappears.
+Both activation gates are required; deploying this code alone does not enable
+OCR on routine mail reads. A locally built image is not production acceptance.
 
 Validation uses synthetic rasters and the actual installed Tesseract engine;
 it does not refetch any private original document or replace the earlier PDF
