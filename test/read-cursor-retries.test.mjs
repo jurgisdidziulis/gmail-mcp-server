@@ -22,13 +22,10 @@ function fixture() {
    threads:{get:async()=>{
     state.reads++;
     if(state.threadFail){state.threadFail=false;throw Error('fixture thread failed')}
-    return {data:{id:'t1',messages:state.members.map(id=>({id}))}};
+    const invalid=state.bodyFail;state.bodyFail=false;
+    return {data:{id:'t1',messages:state.members.map(id=>({id,threadId:'t1',labelIds:['INBOX','UNREAD'],payload:{mimeType:'text/plain',headers:[],body:{size:invalid?999:7,data:Buffer.from('fixture').toString('base64url')}}}))}};
    }}
   }};
-  s.getEmail=async id=>{
-   if(state.bodyFail){state.bodyFail=false;throw Error('fixture body evidence failed')}
-   return {id,threadId:'t1',labelIds:['INBOX','UNREAD'],attachments:[],body:'fixture'};
-  };
   return s;
  }
  return {state,service};

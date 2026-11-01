@@ -434,28 +434,35 @@ export class GmailService {
       id: messageId,
       format: "full",
     });
-    if (!res.data.id || !res.data.threadId || !res.data.payload) {
+    return this.emailDetailFromProviderMessage(res.data, messageId);
+  }
+
+  private async emailDetailFromProviderMessage(
+    data: gmail_v1.Schema$Message,
+    messageId: string,
+  ): Promise<EmailDetail> {
+    if (!data.id || !data.threadId || !data.payload) {
       throw new Error("Malformed Gmail message response: id, threadId, and payload are required");
     }
-    if (res.data.id !== messageId) {
+    if (data.id !== messageId) {
       throw new Error("Gmail message identity did not match the requested message");
     }
 
     let safePayload: gmail_v1.Schema$MessagePart;
     try {
-      safePayload = stripAttachments(res.data.payload, true);
+      safePayload = stripAttachments(data.payload, true);
     } catch (error) {
       if (!(error instanceof Error) || error.message !== 'Admin shadow: incomplete/noncanonical body') throw error;
       // Never tolerate arbitrary size discrepancies. Prove the single observed
       // provider transformation against the same original message/history.
-      if (!this.expectedAccount || !res.data.historyId) throw error;
+      if (!this.expectedAccount || !data.historyId) throw error;
       const profile = await this.gmail.users.getProfile({ userId: 'me' });
       if (profile.data.emailAddress?.toLowerCase() !== this.expectedAccount.toLowerCase()) throw error;
       const original = await this.gmail.users.messages.get({ userId: 'me', id: messageId, format: 'raw' },
         { timeout: 15000, maxContentLength: 8 * 1024 * 1024 });
-      if (original.data.id !== messageId || original.data.threadId !== res.data.threadId ||
-        original.data.historyId !== res.data.historyId || typeof original.data.raw !== 'string') throw error;
-      safePayload = stripAttachments(reconcileOriginalBom(res.data.payload, original.data.raw), true);
+      if (original.data.id !== messageId || original.data.threadId !== data.threadId ||
+        original.data.historyId !== data.historyId || typeof original.data.raw !== 'string') throw error;
+      safePayload = stripAttachments(reconcileOriginalBom(data.payload, original.data.raw), true);
     }
     const headers: gmail_v1.Schema$MessagePartHeader[] = safePayload.headers ?? [];
     for (const name of ["from", "subject", "date", "message-id"]) {
@@ -474,22 +481,22 @@ export class GmailService {
 
     const body = this.extractBody(safePayload);
     const unsubscribeLinks = this.parseUnsubscribeLinks(headersMap, body);
-    const attachments = this.extractAttachments(res.data.payload ?? {});
+    const attachments = this.extractAttachments(data.payload ?? {});
     if (attachments.some((attachment) => !attachment.attachment_id)) {
       throw new Error("Malformed Gmail attachment evidence: attachment id is required");
     }
 
     return {
-      id: res.data.id!,
-      threadId: res.data.threadId!,
-      historyId: res.data.historyId,
+      id: data.id!,
+      threadId: data.threadId!,
+      historyId: data.historyId,
       subject: hdr("Subject"),
       from: hdr("From"),
       to: hdr("To"),
       date: hdr("Date"),
       snippet: body.slice(0, 200), // never substitute provider preview for excluded body evidence
       body,
-      labelIds: res.data.labelIds ?? [],
+      labelIds: data.labelIds ?? [],
       headers: headersMap,
       unsubscribeLinks,
       attachments,
@@ -629,8 +636,8 @@ export class GmailService {
     const thread = await this.gmail.users.threads.get({
       userId: "me",
       id: threadId,
-      format: "minimal",
-    });
+      format: "full",
+    }, { timeout: 15000, maxContentLength: 8 * 1024 * 1024, retry: false });
     if (thread.data.id !== threadId) {
       throw new Error("Gmail provider thread identity did not match the requested thread");
     }
@@ -642,6 +649,9 @@ export class GmailService {
       throw new Error("Malformed Gmail thread response: every message requires an id");
     }
     const messageIds = rawMessages.map((message) => message.id as string);
+    if (new Set(messageIds).size !== messageIds.length) {
+      throw new Error("Malformed Gmail thread response: duplicate message ids");
+    }
     const boundsHash = threadBoundsHash(messageIds);
     if (decodedToken && decodedToken.bounds_hash !== boundsHash) {
       throw new Error("Gmail thread page token no longer matches the current thread bounds");
@@ -651,9 +661,14 @@ export class GmailService {
       throw new Error("Gmail thread page token no longer matches the current thread bounds");
     }
     const end = Math.min(offset + limit, messageIds.length);
-    const messages = await Promise.all(
-      messageIds.slice(offset, end).map((messageId) => this.getEmail(messageId))
-    );
+    // threads.get(full) already contains provider-owned message bodies. Reuse
+    // that snapshot instead of issuing up to 100 parallel messages.get calls.
+    // Sequential validation bounds exceptional original-MIME proof reads and
+    // stops at the first failure; incomplete evidence never becomes a page.
+    const messages: EmailDetail[] = [];
+    for (const message of rawMessages.slice(offset, end)) {
+      messages.push(await this.emailDetailFromProviderMessage(message, message.id!));
+    }
     if (messages.some((message) => message.threadId !== threadId)) {
       throw new Error("Gmail thread identity did not match the requested thread");
     }
