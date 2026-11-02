@@ -4,6 +4,10 @@ import { legacyMimeParameters } from './mime-parameters.js';
 // The strict shadow parser stays unchanged. No size tolerance is admitted.
 export function reconcileOriginalBom(payload: any, encodedRaw: string): any {
   let proofStage = 'input_contract';
+  let mimeClass = 'unknown';
+  let charsetClass = 'unknown';
+  let transferClass = 'unknown';
+  let lengthDeltaClass = 'unknown';
   const fail = (): never => {
     // Fixed stage codes are safe to retain in provider logs. Never include the
     // account, message/thread identity, headers, filenames or source bytes.
@@ -11,6 +15,10 @@ export function reconcileOriginalBom(payload: any, encodedRaw: string): any {
       level: 'warn',
       event: 'original_mime_proof_rejected',
       proof_stage: proofStage,
+      mime_class: mimeClass,
+      charset_class: charsetClass,
+      transfer_class: transferClass,
+      length_delta_class: lengthDeltaClass,
     }));
     throw new Error('Original MIME does not prove Gmail BOM normalization');
   };
@@ -110,6 +118,17 @@ export function reconcileOriginalBom(payload: any, encodedRaw: string): any {
     if (structuredType.length !== 1 || structuredType[0].value.replace(/\s+/g, ' ').trim().toLowerCase() !== contentType.replace(/\s+/g, ' ').trim().toLowerCase()) fail();
     const charset = legacyMimeParameters(contentType).get('charset')?.toLowerCase();
     const transfer = headers.get('content-transfer-encoding')?.toLowerCase();
+    mimeClass = mime === 'text/plain' ? 'text_plain' : mime === 'text/html' ? 'text_html' : 'other';
+    charsetClass = charset === 'utf-8' || charset === 'utf8' ? 'utf8' :
+      charset === 'iso-8859-1' ? 'iso8859_1' :
+      ['windows-1250', 'windows-1252', 'windows-1257'].includes(charset ?? '') ? charset!.replace('-', '') :
+      charset === 'ascii' || charset === 'us-ascii' ? 'ascii' : charset ? 'other' : 'missing';
+    transferClass = transfer === 'base64' ? 'base64' : transfer === 'quoted-printable' ? 'quoted_printable' :
+      transfer === '8bit' ? '8bit' : transfer ? 'other' : 'missing';
+    const lengthDelta = full.length - Number(part.body.size);
+    lengthDeltaClass = [-3, -2, -1, 1, 2, 3].includes(lengthDelta)
+      ? (lengthDelta < 0 ? `minus_${Math.abs(lengthDelta)}` : `plus_${lengthDelta}`)
+      : lengthDelta < 0 ? 'minus_other' : lengthDelta > 0 ? 'plus_other' : 'equal';
     if (['iso-8859-1', 'windows-1250', 'windows-1252', 'windows-1257'].includes(charset ?? '') &&
       (transfer === 'quoted-printable' || transfer === '8bit')) {
       // Provider compatibility mode: legacy QP preserves literal terminal SP/HT.
