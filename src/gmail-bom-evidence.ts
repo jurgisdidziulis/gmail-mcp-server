@@ -156,15 +156,26 @@ export function reconcileOriginalBom(payload: any, encodedRaw: string): any {
       repairs++;
       return { ...part, body: { ...part.body, data: original.toString('base64url') } };
     }
-    proofStage = 'utf8_base64_contract';
-    if (charset !== 'utf-8' || headers.get('content-transfer-encoding')?.toLowerCase() !== 'base64') fail();
-    proofStage = 'utf8_base64_source_shape';
-    if (!/^[A-Za-z0-9+/=\r\n]*$/.test(body)) fail();
-    const canonical = body.replace(/[\r\n]/g, '');
-    const original = Buffer.from(canonical, 'base64');
+    proofStage = 'utf8_transfer_contract';
+    if (charset !== 'utf-8' || !['base64', 'quoted-printable'].includes(transfer ?? '')) fail();
+    let original: Buffer;
+    if (transfer === 'base64') {
+      proofStage = 'utf8_base64_source_shape';
+      if (!/^[A-Za-z0-9+/=\r\n]*$/.test(body)) fail();
+      const canonical = body.replace(/[\r\n]/g, '');
+      original = Buffer.from(canonical, 'base64');
+      if (original.toString('base64') !== canonical) fail();
+    } else {
+      proofStage = 'utf8_qp_source_shape';
+      if (/[^\x09\x20-\x7e\r\n]/.test(body) || /\r(?!\n)|(?<!\r)\n/.test(body) ||
+        /=(?![A-Fa-f0-9]{2}|\r\n)/.test(body) ||
+        body.split('\r\n').some(line => line.length > 76)) fail();
+      original = Buffer.from(body.replace(/=\r\n/g, '').replace(/=([A-Fa-f0-9]{2})/g,
+        (_, hex: string) => String.fromCharCode(parseInt(hex, 16))), 'latin1');
+    }
     proofStage = 'utf8_bom_binding';
-    if (original.toString('base64') !== canonical || original.length !== part.body.size ||
-      original.length !== full.length + 3 || !original.subarray(0, 3).equals(Buffer.from([239, 187, 191])) ||
+    if (original.length !== part.body.size || original.length !== full.length + 3 ||
+      !original.subarray(0, 3).equals(Buffer.from([239, 187, 191])) ||
       !original.subarray(3).equals(full)) fail();
     repairs++;
     return { ...part, body: { ...part.body, size: full.length } };
