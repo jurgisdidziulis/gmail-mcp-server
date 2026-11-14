@@ -161,22 +161,23 @@ function createMcpServer(): McpServer {
   );
 
   // ---- check_hostinger_connection ----
-  server.tool(
+  server.registerTool(
     "check_hostinger_connection",
-    "Verify the configured Hostinger IMAP account using INBOX folder metadata only. Does not fetch message envelopes or bodies and never changes mailbox state.",
-    {
+    {description:"Verify the configured Hostinger IMAP account using fixed INBOX (default) or explicitly enabled provider-flagged SENT folder metadata only. Does not fetch message envelopes or bodies and never changes mailbox state.",
+    inputSchema:z.object({
+      hostinger_mailbox_role:z.enum(["INBOX","SENT"]).optional(),
       account: z
         .string()
         .describe("Exact Hostinger account address to verify"),
-    },
-    async ({ account }) => {
+    }).strict()},
+    async ({ account,hostinger_mailbox_role }) => {
       resolveAccounts(account);
       if (!isHostingerAccount(account, hostingerImapConfig)) {
         throw new Error("This check is available only for the Hostinger IMAP account");
       }
       const result = await new ImapReadService(
         hostingerImapConfig!
-      ).checkConnection();
+      ).checkConnection(hostinger_mailbox_role);
       return {
         content: [
           {
@@ -189,10 +190,11 @@ function createMcpServer(): McpServer {
   );
 
   // ---- list_emails ----
-  server.tool(
+  server.registerTool(
     "list_emails",
-    "Search and list emails. Gmail supports its native query syntax; Hostinger supports is:unread, is:read, from:, subject:, newer_than:Nd, and exact after:/before: epoch bounds. account='all' intentionally searches Gmail accounts only.",
-    {
+    {description:"Search and list emails. Gmail supports its native query syntax; Hostinger supports is:unread, is:read, from:, subject:, newer_than:Nd, and exact after:/before: epoch bounds. account='all' intentionally searches Gmail accounts only.",
+    inputSchema:z.object({
+      hostinger_mailbox_role:z.enum(["INBOX","SENT"]).optional(),
       account: z
         .string()
         .describe(
@@ -214,8 +216,9 @@ function createMcpServer(): McpServer {
         .string()
         .optional()
         .describe("Continuation token returned by a previous single-account page"),
-    },
-    async ({ account, query, max_results, page_token }) => {
+    }).strict()},
+    async ({ account, query, max_results, page_token,hostinger_mailbox_role }) => {
+      if(hostinger_mailbox_role!==undefined&&!isHostingerAccount(account,hostingerImapConfig))throw Error("Hostinger mailbox role requires its exact existing account");
       const accounts = resolveAccounts(account);
       if (page_token && accounts.length !== 1) {
         throw new Error("page_token requires one exact account");
@@ -230,10 +233,13 @@ function createMcpServer(): McpServer {
       for (const email of accounts) {
         try {
           const service = await getReadServiceForAccount(email);
-          const page = await service.listEmails(query, max_results, page_token);
+          const page = service instanceof ImapReadService
+            ? await service.listEmails(query,max_results,page_token,hostinger_mailbox_role)
+            : await service.listEmails(query,max_results,page_token);
           const emails = page.emails;
           allResults.push({
             account: email,
+            ...(hostinger_mailbox_role?{hostinger_mailbox_role}:{}),
             emails,
             next_page_token: page.nextPageToken,
             pagination_complete: page.paginationComplete,
@@ -641,10 +647,11 @@ function createMcpServer(): McpServer {
   );
 
   // ---- batch_process ----
-  server.tool(
+  server.registerTool(
     "batch_process",
-    "Fetch a read-only batch of emails for triage. account='all' intentionally scans Gmail accounts only; use the exact Hostinger address to scan it separately.",
-    {
+    {description:"Fetch a read-only batch of emails for triage. account='all' intentionally scans Gmail accounts only; use the exact Hostinger address to scan it separately.",
+    inputSchema:z.object({
+      hostinger_mailbox_role:z.enum(["INBOX","SENT"]).optional(),
       account: z
         .string()
         .describe(
@@ -665,8 +672,9 @@ function createMcpServer(): McpServer {
         .string()
         .optional()
         .describe("Continuation token returned by a previous single-account batch"),
-    },
-    async ({ account, query, max_results, page_token }) => {
+    }).strict()},
+    async ({ account, query, max_results, page_token,hostinger_mailbox_role }) => {
+      if(hostinger_mailbox_role!==undefined&&!isHostingerAccount(account,hostingerImapConfig))throw Error("Hostinger mailbox role requires its exact existing account");
       const accounts = resolveAccounts(account);
       if (page_token && accounts.length !== 1) {
         throw new Error("page_token requires one exact account");
@@ -681,9 +689,12 @@ function createMcpServer(): McpServer {
       for (const email of accounts) {
         try {
           const service = await getReadServiceForAccount(email);
-          const page = await service.batchProcess(query, max_results, page_token);
+          const page = service instanceof ImapReadService
+            ? await service.batchProcess(query,max_results,page_token,hostinger_mailbox_role)
+            : await service.batchProcess(query,max_results,page_token);
           allResults.push({
             account: email,
+            ...(hostinger_mailbox_role?{hostinger_mailbox_role}:{}),
             emails: page.emails,
             next_page_token: page.nextPageToken,
             pagination_complete: page.paginationComplete,
@@ -704,7 +715,7 @@ function createMcpServer(): McpServer {
                 query,
                 results: allResults,
                 pagination_complete: allResults.every((result) => result.pagination_complete),
-                hint: "Review each email and decide whether to archive, label, unsubscribe, or skip. Use the individual tools with the correct account parameter.",
+                hint: isHostingerAccount(account,hostingerImapConfig)?"Hostinger observations are read-only; no label, archive, draft or send is permitted.":"Review each email and decide whether to archive, label, unsubscribe, or skip. Use the individual tools with the correct account parameter.",
               },
               null,
               2
