@@ -1,3 +1,4 @@
+import {requireMailboxRole,resolveProviderSentMailbox,encodeSentMessageId,decodeSentMessageId,type HostingerMailboxRole} from './imap-sent-binding.js';
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { ImapFlow, type ImapFlowOptions } from "imapflow";
 import PostalMime, { type Address } from "postal-mime";
@@ -14,6 +15,7 @@ export interface HostingerImapConfig {
   host: "imap.hostinger.com";
   port: 993;
   secure: true;
+  sentReadEnabled?: true;
 }
 
 type Environment = Record<string, string | undefined>;
@@ -43,6 +45,7 @@ export function getHostingerImapConfig(
     host: "imap.hostinger.com",
     port: 993,
     secure: true,
+    ...(env.HOSTINGER_IMAP_SENT_READ_ENABLED === "true" ? {sentReadEnabled:true as const} : {}),
   };
 }
 
@@ -211,10 +214,11 @@ export function decodeImapMessageId(messageId: string): EncodedMessageId {
 }
 
 interface ImapPageToken {
-  version: 2;
+  version: 2 | 3;
   provider: "hostinger-imap";
   accountBinding: string;
-  mailbox: "INBOX";
+  mailbox: HostingerMailboxRole;
+  folderBinding?: string;
   uidValidity: string;
   queryHash: string;
   upperUid: number;
@@ -244,19 +248,20 @@ function encodeImapPageToken(value: UnsignedImapPageToken, key: string): string 
 function decodeImapPageToken(
   token: string,
   key: string,
-  accountBinding: string
+  accountBinding: string,
+  role:HostingerMailboxRole
 ): ImapPageToken {
   try {
+    if(role==='SENT'&&token.length>2048)throw Error("shape");
     const decoded = Buffer.from(token, "base64url").toString("utf8");
     if (Buffer.from(decoded, "utf8").toString("base64url") !== token) {
       throw new Error("non-canonical");
     }
     const value = JSON.parse(decoded) as Partial<ImapPageToken>;
     if (
-      value.version !== 2 ||
+      (role === "INBOX" ? value.version !== 2 || value.mailbox !== "INBOX" : value.version !== 3 || value.mailbox !== "SENT" || typeof value.folderBinding !== "string" || !/^[a-f0-9]{64}$/.test(value.folderBinding)) ||
       value.provider !== "hostinger-imap" ||
       value.accountBinding !== accountBinding ||
-      value.mailbox !== "INBOX" ||
       typeof value.uidValidity !== "string" || !/^\d+$/.test(value.uidValidity) ||
       typeof value.queryHash !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value.queryHash) ||
       !Number.isSafeInteger(value.upperUid) || Number(value.upperUid) < 1 ||
@@ -264,12 +269,13 @@ function decodeImapPageToken(
       Number(value.beforeUid) > Number(value.upperUid) ||
       typeof value.signature !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value.signature) ||
       Object.keys(value).sort().join(",") !==
-        "accountBinding,beforeUid,mailbox,provider,queryHash,signature,uidValidity,upperUid,version"
+        (role === "INBOX" ? "accountBinding,beforeUid,mailbox,provider,queryHash,signature,uidValidity,upperUid,version" : "accountBinding,beforeUid,folderBinding,mailbox,provider,queryHash,signature,uidValidity,upperUid,version")
     ) {
       throw new Error("shape");
     }
     const { signature, ...unsigned } = value as ImapPageToken;
     const expected = signImapPageToken(unsigned, key);
+    if(role==='SENT'&&Buffer.from(signature,'base64url').toString('base64url')!==signature)throw Error("signature");
     const providedBytes = Buffer.from(signature, "base64url");
     const expectedBytes = Buffer.from(expected, "base64url");
     if (
@@ -312,6 +318,7 @@ interface ImapClientLike {
         readOnly?: boolean;
       }
     | false;
+  list?(): Promise<unknown>;
   connect(): Promise<unknown>;
   mailboxOpen(path: string, options: { readOnly: true }): Promise<unknown>;
   search(query: ImapSearchQuery, options: { uid: true }): Promise<number[] | false>;
@@ -402,13 +409,29 @@ export class ImapReadService {
       ((options) => new ImapFlow(options) as unknown as ImapClientLike);
   }
 
-  async checkConnection(): Promise<{
+  private admitRole(value:unknown):HostingerMailboxRole {
+    const role=requireMailboxRole(value);
+    if(role==='SENT'&&this.config.sentReadEnabled!==true)throw Error('Hostinger Sent reads are disabled');
+    return role;
+  }
+  private async openRole(client:ImapClientLike,role:HostingerMailboxRole):Promise<string|undefined> {
+    if(role==='INBOX'){await client.mailboxOpen('INBOX',{readOnly:true});return undefined;}
+    if(!client.list)throw Error('Hostinger Sent folder discovery unavailable');
+    const resolved=resolveProviderSentMailbox(await client.list());
+    await client.mailboxOpen(resolved.path,{readOnly:true});
+    if(!client.mailbox||client.mailbox.path!==resolved.path||client.mailbox.readOnly!==true)throw Error('Hostinger Sent mailbox read-only binding unavailable');
+    return resolved.binding;
+  }
+
+  async checkConnection(mailboxRole:HostingerMailboxRole="INBOX"): Promise<{
     account: string;
     provider: "hostinger-imap";
-    mailbox: "INBOX";
+    mailbox: HostingerMailboxRole;
+    folder_binding_sha256?: string;
     read_only: true;
     messages: number;
   }> {
+    const role=this.admitRole(mailboxRole);
     const client = this.clientFactory({
       host: this.config.host,
       port: this.config.port,
@@ -427,12 +450,13 @@ export class ImapReadService {
     try {
       await client.connect();
       connected = true;
-      await client.mailboxOpen("INBOX", { readOnly: true });
+      const folderBinding=await this.openRole(client,role);
       if (!client.mailbox) throw new Error("mailbox unavailable");
       return {
         account: this.config.account,
         provider: "hostinger-imap",
-        mailbox: "INBOX",
+        mailbox: role,
+        ...(folderBinding?{folder_binding_sha256:folderBinding}:{}),
         read_only: true,
         messages: client.mailbox.exists ?? 0,
       };
@@ -446,13 +470,16 @@ export class ImapReadService {
   async listEmails(
     query?: string,
     maxResults = 20,
-    pageToken?: string
+    pageToken?: string,
+    mailboxRole:HostingerMailboxRole="INBOX"
   ): Promise<EmailPage> {
+    const role=this.admitRole(mailboxRole);
     const decodedPageToken = pageToken
       ? decodeImapPageToken(
         pageToken,
         this.config.password,
         this.pageTokenAccountBinding,
+        role,
       )
       : null;
     const queryHash = imapQueryHash(query);
@@ -483,7 +510,8 @@ export class ImapReadService {
     try {
       await client.connect();
       connected = true;
-      await client.mailboxOpen("INBOX", { readOnly: true });
+      const folderBinding=await this.openRole(client,role);
+      if(decodedPageToken&&decodedPageToken.folderBinding!==folderBinding)throw new HostingerCompletenessError("Hostinger page token folder binding changed");
       if (!client.mailbox) {
         throw new Error("mailbox unavailable");
       }
@@ -578,7 +606,7 @@ export class ImapReadService {
         ? orderedMessages.length > limit
         : eligible.length > limit;
       const emails = pageMessages.map((message) => {
-        const id = encodeImapMessageId(uidValidity, message.uid);
+        const id = role==='INBOX'?encodeImapMessageId(uidValidity, message.uid):encodeSentMessageId(this.pageTokenAccountBinding,folderBinding!,uidValidity,message.uid,this.config.password);
         const date = message.envelope?.date ?? message.internalDate;
         return {
           id,
@@ -594,10 +622,11 @@ export class ImapReadService {
         emails,
         nextPageToken: hasMore
           ? encodeImapPageToken({
-            version: 2,
+            version: role==='INBOX'?2:3,
             provider: "hostinger-imap",
             accountBinding: this.pageTokenAccountBinding,
-            mailbox: "INBOX",
+            mailbox: role,
+            ...(folderBinding?{folderBinding}:{}),
             uidValidity,
             queryHash,
             upperUid,
@@ -617,7 +646,8 @@ export class ImapReadService {
   }
 
   async getEmail(messageId: string): Promise<EmailDetail> {
-    const decoded = decodeImapMessageId(messageId);
+    const role=this.admitRole(messageId.startsWith("imap-sent:")?"SENT":"INBOX");
+    const decoded=role==='INBOX'?decodeImapMessageId(messageId):decodeSentMessageId(messageId,this.pageTokenAccountBinding,this.config.password);
     const client = this.clientFactory({
       host: this.config.host,
       port: this.config.port,
@@ -640,7 +670,8 @@ export class ImapReadService {
     try {
       await client.connect();
       connected = true;
-      await client.mailboxOpen("INBOX", { readOnly: true });
+      const folderBinding=await this.openRole(client,role);
+      if(role==='SENT'&&(!("folderBinding" in decoded)||decoded.folderBinding!==folderBinding))throw new StaleHostingerMessageIdError();
       if (!client.mailbox) throw new Error("mailbox unavailable");
       if (client.mailbox.uidValidity.toString() !== decoded.uidValidity) {
         throw new StaleHostingerMessageIdError();
@@ -676,7 +707,7 @@ export class ImapReadService {
         headers[header.originalKey] = header.value;
       }
       const date = parsed.date ?? message.internalDate;
-      const id = encodeImapMessageId(decoded.uidValidity, decoded.uid);
+      const id = role==='INBOX'?encodeImapMessageId(decoded.uidValidity,decoded.uid):encodeSentMessageId(this.pageTokenAccountBinding,folderBinding!,decoded.uidValidity,decoded.uid,this.config.password);
       const attachments = (parsed.attachments ?? []).map((attachment, index) => {
         const content = typeof attachment.content === "string"
           ? Buffer.from(attachment.content)
@@ -693,6 +724,7 @@ export class ImapReadService {
           .update([
             "hostinger-imap",
             this.config.account,
+            ...(role==='SENT'?["SENT",folderBinding!]:[]),
             decoded.uidValidity,
             String(decoded.uid),
             String(index),
@@ -751,8 +783,9 @@ export class ImapReadService {
   async batchProcess(
     query: string,
     maxResults = 20,
-    pageToken?: string
+    pageToken?: string,
+    mailboxRole:HostingerMailboxRole="INBOX"
   ): Promise<EmailPage> {
-    return this.listEmails(query, maxResults, pageToken);
+    return this.listEmails(query, maxResults, pageToken,mailboxRole);
   }
 }
