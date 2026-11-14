@@ -1,3 +1,4 @@
+import {observeExplicitQuota} from './quota-observation.js';
 import {extractOriginalPdf} from './pdf/extract.js';
 import {reviewPdfOcr} from './pdf/ocr-pdf-review.js';
 import {createHash} from 'node:crypto';
@@ -81,7 +82,8 @@ export async function readThreadEvidence(service: {
         code === 404 ? 'provider_not_found' : error?.name === 'AbortError' || transportCode === 'ETIMEDOUT' ? 'source_timeout' :
         failureStage === 'source_binding' ? 'source_binding_rejected' :
         failureStage === 'extractor' ? 'extractor_exception' : 'source_fetch_failed';
-      pdfs.push({...incomplete('pdf_source_or_extraction_failed'),failure_stage:failureStage,failure_code:failureCode});
+      const quotaObservation=explicitQuota?observeExplicitQuota(error):undefined;
+      pdfs.push({...incomplete('pdf_source_or_extraction_failed'),failure_stage:failureStage,failure_code:failureCode,...(quotaObservation?{quota_observation:quotaObservation}:{})});
     }
   }
   const complete=pdfs.every(p=>p.status==='complete');
