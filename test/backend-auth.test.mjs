@@ -69,14 +69,14 @@ test("backend auth permits the credential matching the configured digest", () =>
 
 test("production MCP does not register an external-send tool", async () => {
   const indexJs = await readFile(new URL("../dist/index.js", import.meta.url), "utf8");
-  assert.doesNotMatch(indexJs, /server\.tool\(\s*["']send_email["']/);
+  assert.doesNotMatch(indexJs, /server\.(?:tool|registerTool)\(\s*["']send_email["']/);
 });
 
 test("production MCP registers a metadata-only Hostinger connection check", async () => {
   const indexJs = await readFile(new URL("../dist/index.js", import.meta.url), "utf8");
   assert.match(
     indexJs,
-    /server\.tool\(\s*["']check_hostinger_connection["']/
+    /server\.(?:tool|registerTool)\(\s*["']check_hostinger_connection["']/
   );
-  assert.match(indexJs, /checkConnection\(\)/);
+  assert.match(indexJs, /checkConnection\(hostinger_mailbox_role\)/);
 });
