@@ -34,7 +34,7 @@ try {
  if(req.ocrReview===true){
   if(req.maxPages>3){stop('ocr_page_limit');process.exit(0);}
   const {createCanvas}=require('@napi-rs/canvas');
-  const rendered=[];let rasterBytes=0;
+  const rendered:{page:number;width:number;height:number;raster_base64:string;raster_sha256:string}[]=[];let rasterBytes=0;
   for(let n=1;n<=doc.numPages;n++){
    const page=await doc.getPage(n),viewport=page.getViewport({scale:150/72});
    const width=Math.ceil(viewport.width),height=Math.ceil(viewport.height);
@@ -48,7 +48,8 @@ try {
   }
   if(warnings.length){stop('parser_warning');process.exit(0);}
   await task.destroy();
-  process.stdout.write(JSON.stringify({status:'rendered_for_review',review_only:true,extractor:'pdfjs-dist',version,page_count:doc.numPages,source_sha256:createHash('sha256').update(Buffer.from(req.data,'base64')).digest('hex'),pages:rendered}));process.exit(0);
+  // A pipe write can be buffered; exiting before its callback truncates large rasters.
+  await new Promise<void>((resolve,reject)=>process.stdout.write(JSON.stringify({status:'rendered_for_review',review_only:true,extractor:'pdfjs-dist',version,page_count:doc.numPages,source_sha256:createHash('sha256').update(Buffer.from(req.data,'base64')).digest('hex'),pages:rendered}),error=>error?reject(error):resolve()));process.exit(0);
  }
  const imageOps=new Set([OPS.paintImageXObject,OPS.paintInlineImageXObject,OPS.paintImageMaskXObject,OPS.paintImageMaskXObjectGroup,OPS.paintImageXObjectRepeat,OPS.paintInlineImageXObjectGroup]);
  const pages=[];let total=0;
