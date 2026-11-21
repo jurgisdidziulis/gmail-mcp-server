@@ -1,3 +1,4 @@
+import {observeExplicitQuota} from './quota-observation.js';
 import {extractOriginalPdf} from './pdf/extract.js';
 import {reviewPdfOcr} from './pdf/ocr-pdf-review.js';
 import {createHash} from 'node:crypto';
@@ -7,8 +8,6 @@ export async function readThreadEvidence(service: {
   getThread(id: string, limit: number, token?: string): Promise<any>;
   getDocumentAttachment?(input:any):Promise<any>;
 }, account: string, messageId: string, provider: 'gmail' | 'hostinger-imap', maxPdfPages=50, options:{ocrReview?:boolean}={}) {
-  const ocrEnabled=options.ocrReview===true&&process.env.PDF_OCR_REVIEW_ENABLED==='true';
-  let ocrAttempts=0;
   const anchor = await service.getEmail(messageId);
   if (anchor?.id !== messageId || typeof anchor.threadId !== 'string' || !anchor.threadId) throw new Error('Anchor identity mismatch');
   const messages: any[] = [], seen = new Set<string>(), tokens = new Set<string>();
@@ -30,6 +29,13 @@ export async function readThreadEvidence(service: {
     }
   }
   if (!finished || !seen.has(messageId)) throw new Error('Thread traversal incomplete or anchor absent');
+  return extractMessageEvidence(service, account, messageId, provider, maxPdfPages, anchor, messages, undefined, options);
+}
+
+/** Shared extraction with already-admitted explicit message membership. */
+async function extractMessageEvidence(service: {getDocumentAttachment?(input:any):Promise<any>}, account:string, messageId:string, provider: 'gmail' | 'hostinger-imap', maxPdfPages:number, anchor:any, messages:any[], admittedReceivedAt?:string, options:{ocrReview?:boolean}={}) {
+  const ocrEnabled=options.ocrReview===true&&process.env.PDF_OCR_REVIEW_ENABLED==='true';
+  let ocrAttempts=0;
   const attachments: any[] = [];
   for (const m of messages) for (const a of m.attachments) {
     const mime = a.mime_type ?? a.mimeType;
@@ -49,12 +55,12 @@ export async function readThreadEvidence(service: {
     if(!Number.isSafeInteger(matches[0].size)||matches[0].size<1||totalBytes+matches[0].size>16*1024*1024){pdfs.push(incomplete('pdf_thread_byte_limit'));continue;}
     let failureStage = 'source_fetch';
     try {
-      const original=await service.getDocumentAttachment({messageId:message.id,threadId:message.threadId,historyId:message.historyId,attachment:matches[0]});
+      const original=await service.getDocumentAttachment({messageId:message.id,threadId:message.threadId,historyId:message.historyId,...(admittedReceivedAt?{expected_received_at:admittedReceivedAt}:{}),attachment:matches[0]});
       failureStage = 'source_binding';
       // Snapshot provider-owned data before any asynchronous extraction/review.
       const bytes=Buffer.isBuffer(original.bytes)?Buffer.from(original.bytes):original.bytes;
       const source={...original.source};
-      if(!Buffer.isBuffer(bytes)||bytes.length!==matches[0].size||typeof source.attachment_id!=='string'||!source.attachment_id||typeof source.source_part_path!=='string'||!/^root(?:\.\d+)*$/.test(source.source_part_path)||source.account!==account||source.message_id!==message.id||source.thread_id!==message.threadId||source.history_id!==message.historyId||source.filename!==attachment.filename||source.mime_type!==attachment.mime_type||source.byte_size!==bytes.length||source.sha256!==createHash('sha256').update(bytes).digest('hex'))throw Error('source binding');
+      if(!Buffer.isBuffer(bytes)||bytes.length!==matches[0].size||typeof source.attachment_id!=='string'||!source.attachment_id||typeof source.source_part_path!=='string'||!/^root(?:\.\d+)*$/.test(source.source_part_path)||source.account!==account||source.message_id!==message.id||source.thread_id!==message.threadId||source.history_id!==message.historyId||source.filename!==attachment.filename||source.mime_type!==attachment.mime_type||source.byte_size!==bytes.length||source.sha256!==createHash('sha256').update(bytes).digest('hex')||(admittedReceivedAt!==undefined&&source.provider_received_at!==admittedReceivedAt))throw Error('source binding');
       totalBytes+=bytes.length;if(totalBytes>16*1024*1024){pdfs.push(incomplete('pdf_thread_byte_limit'));continue;}
       failureStage = 'extractor';
       const extracted=await extractOriginalPdf(bytes,maxPdfPages);
@@ -81,9 +87,26 @@ export async function readThreadEvidence(service: {
         code === 404 ? 'provider_not_found' : error?.name === 'AbortError' || transportCode === 'ETIMEDOUT' ? 'source_timeout' :
         failureStage === 'source_binding' ? 'source_binding_rejected' :
         failureStage === 'extractor' ? 'extractor_exception' : 'source_fetch_failed';
-      pdfs.push({...incomplete('pdf_source_or_extraction_failed'),failure_stage:failureStage,failure_code:failureCode});
+      const quotaObservation=explicitQuota?observeExplicitQuota(error):undefined;
+      pdfs.push({...incomplete('pdf_source_or_extraction_failed'),failure_stage:failureStage,failure_code:failureCode,...(quotaObservation?{quota_observation:quotaObservation}:{})});
     }
   }
   const complete=pdfs.every(p=>p.status==='complete');
   return {capability:'mail.evidence.read',contract_version:'1.0.0',success:complete,status:complete?'complete':'incomplete_stop',account,anchor_message_id:messageId,thread_id:anchor.threadId,message_count:messages.length,messages,attachment_count:attachments.length,attachments,pdf_count:pdfs.length,pdfs,completeness:{anchor_message_complete:true,thread_complete:true,attachments_enumerated:true,pdf_extraction_complete:complete,reply_context_complete:true},failures:complete?[]:['pdf_extraction_complete']};
+}
+
+/** A bounded incoming-document lane. Never reads another thread member. */
+export async function readMessageEvidence(service: {
+ getEmail(id:string):Promise<any>;
+ getDocumentAttachment?(input:any):Promise<any>;
+}, account:string, messageId:string, provider:'gmail'|'hostinger-imap', notBefore:string, maxPdfPages=50, options:{ocrReview?:boolean}={}) {
+ if(process.env.ACCOUNTING_MESSAGE_EVIDENCE_ENABLED!=='true')throw Error('MESSAGE_EVIDENCE_NOT_ACTIVATED');
+ const cutoff=Date.parse(notBefore);
+ if(provider!=='gmail'||!Number.isFinite(cutoff)||new Date(cutoff).toISOString()!==notBefore||!Number.isInteger(maxPdfPages)||maxPdfPages<1||maxPdfPages>50||(options.ocrReview===true&&maxPdfPages>3))throw Error('MESSAGE_EVIDENCE_BOUNDARY_INVALID');
+ const anchor=await service.getEmail(messageId);
+ if(anchor?.id!==messageId||typeof anchor.threadId!=='string'||!anchor.threadId||!Array.isArray(anchor.attachments)||!Array.isArray(anchor.labelIds)||!anchor.historyId)throw Error('MESSAGE_EVIDENCE_IDENTITY_INVALID');
+ const received=typeof anchor.received_at==='string'?Date.parse(anchor.received_at):NaN;
+ if(!Number.isFinite(received)||new Date(received).toISOString()!==anchor.received_at||received<cutoff||received>Date.now()||!anchor.labelIds.includes('INBOX')||anchor.labelIds.some((x:string)=>x==='SENT'||x==='DRAFT'))throw Error('MESSAGE_EVIDENCE_NOT_FORWARD_INCOMING');
+ const result=await extractMessageEvidence(service,account,messageId,provider,maxPdfPages,anchor,[anchor],anchor.received_at,options);
+ return {...result,capability:'mail.message_evidence.read',evidence_scope:'message',provider_received_at:anchor.received_at,not_before:notBefore,completeness:{...result.completeness,thread_complete:false,reply_context_complete:false}};
 }
