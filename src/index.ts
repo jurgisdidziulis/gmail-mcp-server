@@ -1,4 +1,4 @@
-import { readThreadEvidence } from "./thread-evidence.js";
+import { readMessageEvidence, readThreadEvidence } from "./thread-evidence.js";
 import { createAdminSecurity, escapeHtml } from "./admin-security.js";
 import { verifySendProof, type SendBinding } from './delegated-send.js';
 import express, { Request, Response, NextFunction } from "express";
@@ -296,9 +296,10 @@ function createMcpServer(): McpServer {
       account: z.string().describe("Exact Gmail account address"),
       message_id: z.string().min(1).describe("Exact Gmail source message ID"),
       attachment_id: z.string().min(1).describe("Exact Gmail attachment ID from that source message"),
+      expected_received_at:z.string().datetime().optional().describe("Optional exact provider receipt timestamp; enforces unchanged incoming source before and after download"),
       filename: z.string().optional().describe("Exact attachment filename — used to match when the Gmail attachment ID is not stable"),
     },
-    async ({ account, message_id, attachment_id, filename }) => {
+    async ({ account, message_id, attachment_id, filename, expected_received_at }) => {
       const resolvedAccount = resolveSingleMailAccount(
         account,
         tokenStore.listAccounts(),
@@ -308,7 +309,7 @@ function createMcpServer(): McpServer {
         throw new Error("get_attachment is available only for Gmail accounts");
       }
       const service = await getGmailServiceForAccount(resolvedAccount);
-      const attachment = await service.getAttachment(message_id, attachment_id, filename);
+      const attachment = await service.getAttachment(message_id, attachment_id, filename, expected_received_at);
       return {
         content: [{
           type: "text" as const,
@@ -379,6 +380,24 @@ function createMcpServer(): McpServer {
           }, null, 2),
         }],
       };
+    }
+  );
+
+  server.tool(
+    "get_message_evidence",
+    "Read source-bound PDF evidence for exactly one forward incoming Gmail message; never traverse its thread. Requires explicit activation.",
+    {
+      account:z.string(),message_id:z.string().min(1),
+      not_before:z.string().datetime().describe("Exact server-enrolled forward-only receipt cutoff, canonical UTC ISO timestamp"),
+      ocr_review:z.boolean().default(false).describe("Request bounded review-only OCR; max_pdf_pages must be at most 3"),
+      max_pdf_pages:z.number().int().min(1).max(50).default(50),
+    },
+    async ({account,message_id,not_before,max_pdf_pages,ocr_review})=>{
+      const resolvedAccount=resolveSingleMailAccount(account,tokenStore.listAccounts(),hostingerImapConfig);
+      const service=await getReadServiceForAccount(resolvedAccount);
+      const evidence=await readMessageEvidence(service,resolvedAccount,message_id,
+        isHostingerAccount(resolvedAccount,hostingerImapConfig)?"hostinger-imap":"gmail",not_before,max_pdf_pages,{ocrReview:ocr_review});
+      return {content:[{type:"text" as const,text:JSON.stringify(evidence)}]};
     }
   );
 

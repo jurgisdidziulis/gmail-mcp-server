@@ -14,6 +14,7 @@ import { google, gmail_v1 } from "googleapis";
 // ---------------------------------------------------------------------------
 
 export interface EmailSummary {
+  received_at?: string | null;
   id: string;
   threadId: string;
   subject: string;
@@ -200,7 +201,16 @@ function decodeListPageToken(token: string, key: string, accountBinding: string)
   }
 }
 
+/** Gmail provider timestamp only; Date headers are never receipt evidence. */
+export function gmailReceivedAt(internalDate:unknown):string|null {
+ if(typeof internalDate!=='string'||!/^\d{1,16}$/.test(internalDate))return null;
+ const ms=Number(internalDate);
+ if(!Number.isSafeInteger(ms)||ms<0||ms>8640000000000000)return null;
+ return new Date(ms).toISOString();
+}
+
 export interface EmailDetail {
+  received_at?: string | null;
   historyId?: string | null;
   id: string;
   threadId: string;
@@ -416,6 +426,7 @@ export class GmailService {
     return {
       id: res.data.id!,
       threadId: res.data.threadId!,
+      received_at: gmailReceivedAt(res.data.internalDate),
       subject: hdr("Subject"),
       from: hdr("From"),
       date: hdr("Date"),
@@ -490,6 +501,7 @@ export class GmailService {
       id: data.id!,
       threadId: data.threadId!,
       historyId: data.historyId,
+      received_at: gmailReceivedAt(data.internalDate),
       subject: hdr("Subject"),
       from: hdr("From"),
       to: hdr("To"),
@@ -508,7 +520,7 @@ export class GmailService {
   // -----------------------------------------------------------------------
 
   // Dedicated document-evidence lane; ordinary body/shadow reads never call it.
-  async getDocumentAttachment(input: {messageId:string;threadId:string;historyId:string;attachment:{attachment_id:string;filename:string;mime_type:string;size:number}}) {
+  async getDocumentAttachment(input: {messageId:string;threadId:string;historyId:string;expected_received_at?:string;attachment:{attachment_id:string;filename:string;mime_type:string;size:number}}) {
     if (!this.expectedAccount || !input.historyId || typeof input.attachment.attachment_id !== 'string' || !input.attachment.attachment_id || !Number.isSafeInteger(input.attachment.size) ||
       input.attachment.size <= 0 || input.attachment.size > 8*1024*1024 ||
       (input.attachment.mime_type.toLowerCase() !== 'application/pdf' && !input.attachment.filename.toLowerCase().endsWith('.pdf'))) throw Error('PDF source metadata/bound');
@@ -518,6 +530,7 @@ export class GmailService {
       const response=await this.gmail.users.messages.get({userId:'me',id:input.messageId,format:'full'},{timeout:15000,maxContentLength:8*1024*1024});
       const m=response.data;
       if(m.id!==input.messageId||m.threadId!==input.threadId||m.historyId!==input.historyId||!m.payload)throw Error('PDF source identity/history changed');
+      if(input.expected_received_at!==undefined && (gmailReceivedAt(m.internalDate)!==input.expected_received_at || !m.labelIds?.includes('INBOX') || m.labelIds.some(x=>x==='SENT'||x==='DRAFT')))throw Error('PDF incoming source changed');
       const matches:Array<{part:gmail_v1.Schema$MessagePart;path:string}>=[];const idPaths:string[]=[];let count=0;
       const walk=(part:gmail_v1.Schema$MessagePart,path='root',depth=0)=>{
         if(depth>20||++count>300)throw Error('PDF MIME bound');
@@ -538,10 +551,10 @@ export class GmailService {
     if(bytes.length!==input.attachment.size||bytes.toString('base64url')!==encoded.replace(/=+$/,''))throw Error('PDF original byte size/canonical proof');
     const after=await read();
     if(JSON.stringify(before.metadata)!==JSON.stringify(after.metadata))throw Error('PDF source part changed');
-    return {bytes,source:{account:this.expectedAccount,message_id:input.messageId,thread_id:input.threadId,history_id:input.historyId,attachment_id:before.attachmentId,source_part_path:before.path,filename:input.attachment.filename,mime_type:input.attachment.mime_type,byte_size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}};
+    return {bytes,source:{...(input.expected_received_at?{provider_received_at:input.expected_received_at}:{}),account:this.expectedAccount,message_id:input.messageId,thread_id:input.threadId,history_id:input.historyId,attachment_id:before.attachmentId,source_part_path:before.path,filename:input.attachment.filename,mime_type:input.attachment.mime_type,byte_size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}};
   }
 
-  async getAttachment(messageId: string, attachmentId: string, expectedFilename?: string) {
+  async getAttachment(messageId: string, attachmentId: string, expectedFilename?: string, expectedReceivedAt?: string) {
     const message = await this.gmail.users.messages.get({
       userId: "me",
       id: messageId,
@@ -550,6 +563,7 @@ export class GmailService {
     if (message.data.id !== messageId || !message.data.payload) {
       throw new Error("Gmail provider message identity did not match the requested attachment source");
     }
+    if(expectedReceivedAt!==undefined && (gmailReceivedAt(message.data.internalDate)!==expectedReceivedAt || !message.data.labelIds?.includes('INBOX') || message.data.labelIds.some(x=>x==='SENT'||x==='DRAFT')))throw Error('PDF incoming source changed');
     const idMatches: gmail_v1.Schema$MessagePart[] = [];
     const filenameMatches: gmail_v1.Schema$MessagePart[] = [];
     const visit = (part: gmail_v1.Schema$MessagePart) => {
@@ -575,6 +589,12 @@ export class GmailService {
     const declaredSize = part.body?.size;
     if (!realAttachmentId || !filename || !mimeType || !Number.isSafeInteger(declaredSize) || Number(declaredSize) <= 0) {
       throw new Error("Gmail attachment metadata is incomplete");
+    }
+    if(expectedReceivedAt!==undefined){
+      if(realAttachmentId!==attachmentId || (expectedFilename!==undefined&&filename!==expectedFilename) || !message.data.threadId || !message.data.historyId)throw Error('PDF incoming attachment identity changed');
+      const original=await this.getDocumentAttachment({messageId,threadId:message.data.threadId,historyId:message.data.historyId,expected_received_at:expectedReceivedAt,attachment:{attachment_id:attachmentId,filename,mime_type:mimeType,size:Number(declaredSize)}});
+      if(original.source.attachment_id!==attachmentId)throw Error('PDF incoming attachment identity changed');
+      return{source_message_id:messageId,attachment_id:original.source.attachment_id,filename,mime_type:mimeType,byte_size:original.bytes.length,sha256:original.source.sha256,bytes_base64:original.bytes.toString('base64'),provider_received_at:original.source.provider_received_at};
     }
     const attachment = await this.gmail.users.messages.attachments.get({
       userId: "me",
