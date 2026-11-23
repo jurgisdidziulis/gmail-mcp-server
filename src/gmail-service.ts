@@ -356,6 +356,15 @@ export class GmailService {
     }, account, threadId);
   }
 
+  /** Existing exact Gmail service; provider profile metadata only. */
+  async readAccountIdentity() {
+    if (!this.expectedAccount) throw new Error("Exact existing account required");
+    const result = await this.gmail.users.getProfile({userId:"me"}, {timeout:10000});
+    const email = result.data.emailAddress?.trim().toLowerCase();
+    if (!email || email !== this.expectedAccount.trim().toLowerCase()) throw new Error("Provider account mismatch");
+    return {schema_version:"mail-account-identity.v1",provider:"gmail",resolved_account:email,provider_principal:email,identity_verified:true,metadata_only:true,business_effects:0,observed_at:new Date().toISOString()};
+  }
+
   async listEmails(
     query?: string,
     maxResults: number = 20,
