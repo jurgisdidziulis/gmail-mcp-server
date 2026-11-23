@@ -160,6 +160,15 @@ function createMcpServer(): McpServer {
     }
   );
 
+  server.tool("get_account_identity", "Verify one exact existing Gmail account using provider profile metadata only.",
+    {account:z.string().min(3).max(254)}, async ({account})=>{
+      const resolved=resolveSingleMailAccount(account,tokenStore.listAccounts(),hostingerImapConfig);
+      if(isHostingerAccount(resolved,hostingerImapConfig))throw new Error("Gmail identity requires an existing Gmail account");
+      const service=await getGmailServiceForAccount(resolved);
+      const identity=await service.readAccountIdentity();
+      return {content:[{type:"text" as const,text:JSON.stringify(identity)}]};
+    });
+
   // ---- check_hostinger_connection ----
   server.tool(
     "check_hostinger_connection",
