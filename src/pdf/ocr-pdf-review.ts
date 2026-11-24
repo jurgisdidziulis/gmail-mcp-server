@@ -59,7 +59,7 @@ export async function reviewPdfOcr(original:Buffer,maxPages=3):Promise<any>{
  active=true;
  try{
   const preflight=await extractOriginalPdf(bytes,maxPages,{timeout:Math.min(15000,deadline-Date.now())});
-  if(preflight.status!=='incomplete_stop'||preflight.reason!=='needs_ocr_or_visual_review')return held(preflight.status==='complete'?'ocr_not_needed':preflight.reason??'ocr_preflight_failed');
+  if(preflight.status!=='incomplete_stop'||!['needs_ocr_or_visual_review','annotations_or_forms_require_review'].includes(preflight.reason))return held(preflight.status==='complete'?'ocr_not_needed':preflight.reason??'ocr_preflight_failed');
   if(Date.now()>=deadline)return held('ocr_timeout');
   const result=await render(bytes,maxPages,Math.min(10000,deadline-Date.now()));
   if(!result||typeof result!=='object'||Array.isArray(result))return held('ocr_render_worker_contract');

@@ -1,4 +1,5 @@
 import './network-deny.js';
+import {assertInertAnnotationReview,validateOriginalAnnotationDictionaries} from './annotation-review.js';
 import {collectTextNotes} from './note-review.js';
 import {collectTextFields} from './form-review.js';
 import {createHash} from 'node:crypto';
@@ -13,7 +14,7 @@ const stop=(reason:string)=>process.stdout.write(JSON.stringify({status:'incompl
 try {
  const req=JSON.parse(input);
  if(!Number.isInteger(req.maxPages)||req.maxPages<1||req.maxPages>200||!Number.isInteger(req.maxText)||req.maxText<1||req.maxText>500000)throw Error('limits');
- const {getDocument,OPS,version}=await import('pdfjs-dist/legacy/build/pdf.mjs');
+ const {getDocument,OPS,version,AnnotationMode}=await import('pdfjs-dist/legacy/build/pdf.mjs');
  if(version!=='6.2.108')throw Error('version');
  const root=dirname(require.resolve('pdfjs-dist/package.json'));
  const task=getDocument({data:new Uint8Array(Buffer.from(req.data,'base64')),standardFontDataUrl:join(root,'standard_fonts/'),cMapUrl:join(root,'cmaps/'),cMapPacked:true,wasmUrl:join(root,'wasm/'),enableXfa:false,useSystemFonts:false,disableFontFace:true,isOffscreenCanvasSupported:false,useWorkerFetch:false,stopAtErrors:true});
@@ -28,8 +29,12 @@ try {
  if(fields||hasAnnotations){
   let review,forms;try{review=collectTextNotes(annotationPages);if(fields)forms=collectTextFields(fields,annotationPages,xfa);}catch(e:any){stop(e.message==='embedded_actions'?'embedded_actions':['note_review_limit','form_review_limit','form_review_contract','xfa_requires_review'].includes(e.message)?e.message:'note_review_contract');process.exit(0);}
   if(warnings.length){stop('parser_warning');process.exit(0);}
+  if(req.ocrReview===true){
+   try{await validateOriginalAnnotationDictionaries(Buffer.from(req.data,'base64'),annotationPages);assertInertAnnotationReview(annotationPages,review,forms);}catch(e:any){const reasons=['embedded_actions','ocr_page_limit','annotation_review_contract','annotation_review_raw_contract','annotation_review_raw_limit','annotation_review_rich_content','annotation_review_limit','annotation_review_hidden_annotation','annotation_review_conflicting_form_values','annotation_review_unsupported_widget','annotation_review_unsupported_note','annotation_review_unsupported_link','annotation_review_unsupported_annotation'];stop(reasons.includes(e?.message)?e.message:'annotation_review_contract');process.exit(0);}
+  }else{
   await task.destroy();
   process.stdout.write(JSON.stringify({status:'incomplete_stop',reason:'annotations_or_forms_require_review',extractor:'pdfjs-dist',version:'6.2.108',...(review.notes.length?{note_review:review}:{}),...(forms?.widgets.length?{form_review:forms}:{})}));process.exit(0);
+  }
  }
  if(req.ocrReview===true){
   if(req.maxPages>3){stop('ocr_page_limit');process.exit(0);}
@@ -40,7 +45,7 @@ try {
    const width=Math.ceil(viewport.width),height=Math.ceil(viewport.height);
    if(width<1||height<1||width>4096||height>4096||width*height>4_000_000){stop('ocr_raster_pixel_limit');process.exit(0);}
    const canvas=createCanvas(width,height);
-   await page.render({canvas,canvasContext:canvas.getContext('2d'),viewport,background:'rgb(255,255,255)'}).promise;
+   await page.render({canvas,canvasContext:canvas.getContext('2d'),viewport,annotationMode:AnnotationMode.ENABLE,background:'rgb(255,255,255)'}).promise;
    const png:Buffer=canvas.toBuffer('image/png');rasterBytes+=png.length;
    if(png.length>2*1024*1024||rasterBytes>6*1024*1024){stop('ocr_raster_byte_limit');process.exit(0);}
    rendered.push({page:n,width,height,raster_base64:png.toString('base64'),raster_sha256:createHash('sha256').update(png).digest('hex')});
