@@ -13,7 +13,7 @@ const keys=(value:any)=>Object.keys(value).sort().join(',');
 const held=(reason:string)=>({status:'incomplete_stop',reason,review_only:true,extraction_complete:false});
 let active=false;
 
-async function render(bytes:Buffer,maxPages:number,timeout:number):Promise<any>{
+async function render(bytes:Buffer,maxPages:number,timeout:number,forwardIncoming=false):Promise<any>{
  return await new Promise(resolveResult=>{
   const args=['--permission','--allow-fs-read='+resolve(root,'dist/pdf'),'--allow-fs-read='+resolve(root,'node_modules'),'--allow-addons','--max-old-space-size=128','--disable-proto=throw','--disallow-code-generation-from-strings',worker];
   const drop=process.platform==='linux'&&process.getuid?.()===0?{uid:65534,gid:65534}:{};
@@ -46,14 +46,15 @@ async function render(bytes:Buffer,maxPages:number,timeout:number):Promise<any>{
    try{finish(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks))));}
    catch{finish(held('ocr_render_worker_contract'));}
   });
-  child.stdin.end(JSON.stringify({data:bytes.toString('base64'),maxPages,maxText:40000,ocrReview:true}));
+  child.stdin.end(JSON.stringify({data:bytes.toString('base64'),maxPages,maxText:40000,ocrReview:true,forwardIncomingReview:forwardIncoming}));
  });
 }
 
 /** Explicit internal review path only. Normal PDF extraction remains unchanged. */
-export async function reviewPdfOcr(original:Buffer,maxPages=3):Promise<any>{
+export async function reviewPdfOcr(original:Buffer,maxPages=3,options:{forwardIncoming?:boolean}={}):Promise<any>{
  if(!Buffer.isBuffer(original)||original.length<5||original.length>8*1024*1024)return held('byte_limit');
- if(!Number.isInteger(maxPages)||maxPages<1||maxPages>3)return held('ocr_page_limit');
+ const incoming=options.forwardIncoming===true&&maxPages>3;
+ if(!Number.isInteger(maxPages)||maxPages<1||maxPages>(incoming?50:3))return held('ocr_page_limit');
  if(active)return held('ocr_pdf_busy');
  const bytes=Buffer.from(original),sourceSha=hash(bytes),deadline=Date.now()+30000;
  active=true;
@@ -61,7 +62,7 @@ export async function reviewPdfOcr(original:Buffer,maxPages=3):Promise<any>{
   const preflight=await extractOriginalPdf(bytes,maxPages,{timeout:Math.min(15000,deadline-Date.now())});
   if(preflight.status!=='incomplete_stop'||!['needs_ocr_or_visual_review','annotations_or_forms_require_review'].includes(preflight.reason))return held(preflight.status==='complete'?'ocr_not_needed':preflight.reason??'ocr_preflight_failed');
   if(Date.now()>=deadline)return held('ocr_timeout');
-  const result=await render(bytes,maxPages,Math.min(10000,deadline-Date.now()));
+  const result=await render(bytes,maxPages,Math.min(10000,deadline-Date.now()),incoming);
   if(!result||typeof result!=='object'||Array.isArray(result))return held('ocr_render_worker_contract');
   if(result.status==='incomplete_stop')return held(result.reason??'ocr_render_failed');
   if(keys(result)!=='extractor,page_count,pages,review_only,source_sha256,status,version'||result.status!=='rendered_for_review'||result.review_only!==true||result.source_sha256!==sourceSha||result.extractor!=='pdfjs-dist'||result.version!=='6.2.108'||!Number.isInteger(result.page_count)||result.page_count<1||result.page_count>maxPages||!Array.isArray(result.pages)||result.pages.length!==result.page_count)return held('ocr_render_worker_contract');
@@ -80,6 +81,6 @@ export async function reviewPdfOcr(original:Buffer,maxPages=3):Promise<any>{
   }
   return {status:'review_required',review_only:true,extraction_complete:false,source_sha256:sourceSha,byte_size:bytes.length,page_count:result.page_count,pages,
    renderer:{name:'pdfjs-dist',version:'6.2.108',worker_sha256:hash(await readFile(worker)),dpi:150},
-   scope:'Original-byte-bound rendering and OCR candidates only; visual correctness and business facts unverified'};
+   scope:'Original-byte-bound rendering and OCR candidates only; visual correctness and business facts unverified',...(incoming?{schema_version:2 as const,review_scope:'forward_incoming' as const,review_page_limit:50 as const}:{})};
  }finally{active=false;}
 }

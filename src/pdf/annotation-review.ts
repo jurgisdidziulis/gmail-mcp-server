@@ -1,9 +1,9 @@
 /** Eligibility for inert raster review only, never complete document evidence.
  * Existing document/page JS, XFA and note/form collector action checks MUST run
  * first. Canvas rendering has no DOM annotation layer or link navigation. */
-export function assertInertAnnotationReview(pages:{page:number;annotations:any[]}[],notes:any,forms:any){
+export function assertInertAnnotationReview(pages:{page:number;annotations:any[]}[],notes:any,forms:any,maxPages=3){
  const deny=(reason:string):never=>{throw Error(reason)};
- if(!Array.isArray(pages)||pages.length<1||pages.length>3)deny('ocr_page_limit');
+ if(!Array.isArray(pages)||pages.length<1||pages.length>maxPages||!Number.isInteger(maxPages)||maxPages<1||maxPages>50)deny('ocr_page_limit');
  const noteIds=new Set(Array.isArray(notes?.notes)?notes.notes.map((n:any)=>n.annotation_id):[]);
  const widgetIds=new Set(Array.isArray(forms?.widgets)?forms.widgets.map((w:any)=>w.widget_id):[]);
  if(forms?.conflicting_names?.length)deny('annotation_review_conflicting_form_values');
@@ -31,7 +31,7 @@ export function assertInertAnnotationReview(pages:{page:number;annotations:any[]
 /** Independent data-only dictionary admission, bound to the same original
  * bytes and exact indirect annotation IDs exposed by the pinned PDF.js parser.
  * Loaded only for explicit annotated OCR; ordinary extraction does not use it. */
-export async function validateOriginalAnnotationDictionaries(bytes:Buffer,pages:{page:number;annotations:any[]}[]){
+export async function validateOriginalAnnotationDictionaries(bytes:Buffer,pages:{page:number;annotations:any[]}[],maxPages=3){
  const deny=(reason:string):never=>{throw Error(reason)};
  if(!Buffer.isBuffer(bytes)||bytes.length<5||bytes.length>8*1024*1024)deny('annotation_review_raw_limit');
  const original=Buffer.from(bytes);
@@ -39,7 +39,7 @@ export async function validateOriginalAnnotationDictionaries(bytes:Buffer,pages:
   const {PDFDocument,PDFDict,PDFArray,PDFName,PDFRef,PDFNumber,PDFString,PDFHexString,PDFBool,ParseSpeeds}=await import('pdf-lib');
   const doc=await PDFDocument.load(original,{ignoreEncryption:false,updateMetadata:false,throwOnInvalidObject:true,parseSpeed:ParseSpeeds.Slow});
   if(doc.context.enumerateIndirectObjects().length>2000)deny('annotation_review_raw_limit');
-  const rawPages=doc.getPages();if(rawPages.length!==pages.length||rawPages.length<1||rawPages.length>3)deny('annotation_review_raw_contract');
+  const rawPages=doc.getPages();if(rawPages.length!==pages.length||rawPages.length<1||rawPages.length>maxPages||!Number.isInteger(maxPages)||maxPages<1||maxPages>50)deny('annotation_review_raw_contract');
   const name=(key:string)=>PDFName.of(key),lookup=(value:any):any=>doc.context.lookup(value);
   const id=(ref:any)=>ref.objectNumber+'R'+(ref.generationNumber===0?'':ref.generationNumber);
   const all=new Set<string>();let total=0;
