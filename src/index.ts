@@ -398,7 +398,7 @@ function createMcpServer(): McpServer {
     {
       account:z.string(),message_id:z.string().min(1),
       not_before:z.string().datetime().describe("Exact server-enrolled forward-only receipt cutoff, canonical UTC ISO timestamp"),
-      ocr_review:z.boolean().default(false).describe("Request bounded review-only OCR; max_pdf_pages must be at most 3"),
+      ocr_review:z.boolean().default(false).describe("Request forward-incoming review-only OCR within unchanged overall resource limits; max_pdf_pages at most 50"),
       max_pdf_pages:z.number().int().min(1).max(50).default(50),
     },
     async ({account,message_id,not_before,max_pdf_pages,ocr_review})=>{

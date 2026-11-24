@@ -30,14 +30,14 @@ try {
   let review,forms;try{review=collectTextNotes(annotationPages);if(fields)forms=collectTextFields(fields,annotationPages,xfa);}catch(e:any){stop(e.message==='embedded_actions'?'embedded_actions':['note_review_limit','form_review_limit','form_review_contract','xfa_requires_review'].includes(e.message)?e.message:'note_review_contract');process.exit(0);}
   if(warnings.length){stop('parser_warning');process.exit(0);}
   if(req.ocrReview===true){
-   try{await validateOriginalAnnotationDictionaries(Buffer.from(req.data,'base64'),annotationPages);assertInertAnnotationReview(annotationPages,review,forms);}catch(e:any){const reasons=['embedded_actions','ocr_page_limit','annotation_review_contract','annotation_review_raw_contract','annotation_review_raw_limit','annotation_review_rich_content','annotation_review_limit','annotation_review_hidden_annotation','annotation_review_conflicting_form_values','annotation_review_unsupported_widget','annotation_review_unsupported_note','annotation_review_unsupported_link','annotation_review_unsupported_annotation'];stop(reasons.includes(e?.message)?e.message:'annotation_review_contract');process.exit(0);}
+   try{await validateOriginalAnnotationDictionaries(Buffer.from(req.data,'base64'),annotationPages,req.forwardIncomingReview===true?50:3);assertInertAnnotationReview(annotationPages,review,forms,req.forwardIncomingReview===true?50:3);}catch(e:any){const reasons=['embedded_actions','ocr_page_limit','annotation_review_contract','annotation_review_raw_contract','annotation_review_raw_limit','annotation_review_rich_content','annotation_review_limit','annotation_review_hidden_annotation','annotation_review_conflicting_form_values','annotation_review_unsupported_widget','annotation_review_unsupported_note','annotation_review_unsupported_link','annotation_review_unsupported_annotation'];stop(reasons.includes(e?.message)?e.message:'annotation_review_contract');process.exit(0);}
   }else{
   await task.destroy();
   process.stdout.write(JSON.stringify({status:'incomplete_stop',reason:'annotations_or_forms_require_review',extractor:'pdfjs-dist',version:'6.2.108',...(review.notes.length?{note_review:review}:{}),...(forms?.widgets.length?{form_review:forms}:{})}));process.exit(0);
   }
  }
  if(req.ocrReview===true){
-  if(req.maxPages>3){stop('ocr_page_limit');process.exit(0);}
+  if(req.maxPages>(req.forwardIncomingReview===true?50:3)){stop('ocr_page_limit');process.exit(0);}
   const {createCanvas}=require('@napi-rs/canvas');
   const rendered:{page:number;width:number;height:number;raster_base64:string;raster_sha256:string}[]=[];let rasterBytes=0;
   for(let n=1;n<=doc.numPages;n++){

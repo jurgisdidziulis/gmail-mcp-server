@@ -68,7 +68,7 @@ async function extractMessageEvidence(service: {getDocumentAttachment?(input:any
         let ocrReview;
         if(ocrEnabled&&(extracted.reason==='needs_ocr_or_visual_review'||admittedReceivedAt!==undefined&&extracted.reason==='annotations_or_forms_require_review')){
           // One bounded OCR attempt per thread; never promote review text to complete evidence.
-          ocrReview=ocrAttempts++===0?await reviewPdfOcr(bytes,Math.min(maxPdfPages,3)):
+          ocrReview=ocrAttempts++===0?await reviewPdfOcr(bytes,Math.min(maxPdfPages,admittedReceivedAt!==undefined?50:3),{forwardIncoming:admittedReceivedAt!==undefined}):
             {status:'incomplete_stop',reason:'ocr_thread_attempt_limit',review_only:true,extraction_complete:false};
         }
         pdfs.push({...incomplete(extracted.reason??'pdf_extraction_failed'),source,...(extracted.note_review?{note_review:extracted.note_review}:{}),...(extracted.form_review?{form_review:extracted.form_review}:{}),...(ocrReview?{ocr_review:ocrReview}:{})});continue;
@@ -102,7 +102,7 @@ export async function readMessageEvidence(service: {
 }, account:string, messageId:string, provider:'gmail'|'hostinger-imap', notBefore:string, maxPdfPages=50, options:{ocrReview?:boolean}={}) {
  if(process.env.ACCOUNTING_MESSAGE_EVIDENCE_ENABLED!=='true')throw Error('MESSAGE_EVIDENCE_NOT_ACTIVATED');
  const cutoff=Date.parse(notBefore);
- if(provider!=='gmail'||!Number.isFinite(cutoff)||new Date(cutoff).toISOString()!==notBefore||!Number.isInteger(maxPdfPages)||maxPdfPages<1||maxPdfPages>50||(options.ocrReview===true&&maxPdfPages>3))throw Error('MESSAGE_EVIDENCE_BOUNDARY_INVALID');
+ if(provider!=='gmail'||!Number.isFinite(cutoff)||new Date(cutoff).toISOString()!==notBefore||!Number.isInteger(maxPdfPages)||maxPdfPages<1||maxPdfPages>50)throw Error('MESSAGE_EVIDENCE_BOUNDARY_INVALID');
  const anchor=await service.getEmail(messageId);
  if(anchor?.id!==messageId||typeof anchor.threadId!=='string'||!anchor.threadId||!Array.isArray(anchor.attachments)||!Array.isArray(anchor.labelIds)||!anchor.historyId)throw Error('MESSAGE_EVIDENCE_IDENTITY_INVALID');
  const received=typeof anchor.received_at==='string'?Date.parse(anchor.received_at):NaN;
