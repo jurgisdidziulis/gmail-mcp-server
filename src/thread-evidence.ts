@@ -66,7 +66,7 @@ async function extractMessageEvidence(service: {getDocumentAttachment?(input:any
       const extracted=await extractOriginalPdf(bytes,maxPdfPages);
       if(extracted.status!=='complete'){
         let ocrReview;
-        if(ocrEnabled&&extracted.reason==='needs_ocr_or_visual_review'){
+        if(ocrEnabled&&(extracted.reason==='needs_ocr_or_visual_review'||admittedReceivedAt!==undefined&&extracted.reason==='annotations_or_forms_require_review')){
           // One bounded OCR attempt per thread; never promote review text to complete evidence.
           ocrReview=ocrAttempts++===0?await reviewPdfOcr(bytes,Math.min(maxPdfPages,3)):
             {status:'incomplete_stop',reason:'ocr_thread_attempt_limit',review_only:true,extraction_complete:false};
