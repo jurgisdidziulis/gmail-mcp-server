@@ -400,12 +400,13 @@ function createMcpServer(): McpServer {
       not_before:z.string().datetime().describe("Exact server-enrolled forward-only receipt cutoff, canonical UTC ISO timestamp"),
       ocr_review:z.boolean().default(false).describe("Request forward-incoming review-only OCR within unchanged overall resource limits; max_pdf_pages at most 50"),
       max_pdf_pages:z.number().int().min(1).max(50).default(50),
+      pdf_filename:z.string().min(1).max(255).refine(name => name.toLowerCase().endsWith('.pdf')).optional().describe("Extract only this exact PDF; retain metadata for all attachments"),
     },
-    async ({account,message_id,not_before,max_pdf_pages,ocr_review})=>{
+    async ({account,message_id,not_before,max_pdf_pages,ocr_review,pdf_filename})=>{
       const resolvedAccount=resolveSingleMailAccount(account,tokenStore.listAccounts(),hostingerImapConfig);
       const service=await getReadServiceForAccount(resolvedAccount);
       const evidence=await readMessageEvidence(service,resolvedAccount,message_id,
-        isHostingerAccount(resolvedAccount,hostingerImapConfig)?"hostinger-imap":"gmail",not_before,max_pdf_pages,{ocrReview:ocr_review});
+        isHostingerAccount(resolvedAccount,hostingerImapConfig)?"hostinger-imap":"gmail",not_before,max_pdf_pages,{ocrReview:ocr_review,pdfFilename:pdf_filename});
       return {content:[{type:"text" as const,text:JSON.stringify(evidence)}]};
     }
   );

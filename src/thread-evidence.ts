@@ -33,7 +33,7 @@ export async function readThreadEvidence(service: {
 }
 
 /** Shared extraction with already-admitted explicit message membership. */
-async function extractMessageEvidence(service: {getDocumentAttachment?(input:any):Promise<any>}, account:string, messageId:string, provider: 'gmail' | 'hostinger-imap', maxPdfPages:number, anchor:any, messages:any[], admittedReceivedAt?:string, options:{ocrReview?:boolean}={}) {
+async function extractMessageEvidence(service: {getDocumentAttachment?(input:any):Promise<any>}, account:string, messageId:string, provider: 'gmail' | 'hostinger-imap', maxPdfPages:number, anchor:any, messages:any[], admittedReceivedAt?:string, options:{ocrReview?:boolean;pdfFilename?:string}={}) {
   const ocrEnabled=options.ocrReview===true&&process.env.PDF_OCR_REVIEW_ENABLED==='true';
   let ocrAttempts=0;
   const attachments: any[] = [];
@@ -42,8 +42,16 @@ async function extractMessageEvidence(service: {getDocumentAttachment?(input:any
     if (typeof a.filename !== 'string' || !a.filename || typeof mime !== 'string' || !mime) throw new Error('Attachment metadata malformed');
     attachments.push({source_message_id:m.id,filename:a.filename,mime_type:mime,is_pdf:mime.toLowerCase()==='application/pdf'||a.filename.toLowerCase().endsWith('.pdf')});
   }
+  let documents = attachments.filter(attachment => attachment.is_pdf);
+  if (options.pdfFilename !== undefined) {
+    const matches = attachments.filter(attachment => attachment.filename === options.pdfFilename);
+    if (matches.length !== 1 || matches[0].mime_type !== 'application/pdf') {
+      throw Error('MESSAGE_EVIDENCE_PDF_SELECTION_INVALID');
+    }
+    documents = matches;
+  }
   const pdfs:any[]=[];let totalBytes=0,totalText=0;let providerRateLimited=false;
-  for(const attachment of attachments.filter(a=>a.is_pdf)) {
+  for(const attachment of documents) {
     const incomplete=(error:string)=>({...attachment,status:'incomplete',error});
     if(providerRateLimited){pdfs.push({...incomplete('provider_rate_limit'),failure_stage:'source_fetch',failure_code:'provider_rate_limit'});continue;}
     if(process.env.PDF_DOCUMENT_EVIDENCE_ENABLED!=='true'){pdfs.push(incomplete('pdf_extraction_not_activated'));continue;}
@@ -99,7 +107,7 @@ async function extractMessageEvidence(service: {getDocumentAttachment?(input:any
 export async function readMessageEvidence(service: {
  getEmail(id:string):Promise<any>;
  getDocumentAttachment?(input:any):Promise<any>;
-}, account:string, messageId:string, provider:'gmail'|'hostinger-imap', notBefore:string, maxPdfPages=50, options:{ocrReview?:boolean}={}) {
+}, account:string, messageId:string, provider:'gmail'|'hostinger-imap', notBefore:string, maxPdfPages=50, options:{ocrReview?:boolean;pdfFilename?:string}={}) {
  if(process.env.ACCOUNTING_MESSAGE_EVIDENCE_ENABLED!=='true')throw Error('MESSAGE_EVIDENCE_NOT_ACTIVATED');
  const cutoff=Date.parse(notBefore);
  if(provider!=='gmail'||!Number.isFinite(cutoff)||new Date(cutoff).toISOString()!==notBefore||!Number.isInteger(maxPdfPages)||maxPdfPages<1||maxPdfPages>50)throw Error('MESSAGE_EVIDENCE_BOUNDARY_INVALID');
@@ -108,5 +116,5 @@ export async function readMessageEvidence(service: {
  const received=typeof anchor.received_at==='string'?Date.parse(anchor.received_at):NaN;
  if(!Number.isFinite(received)||new Date(received).toISOString()!==anchor.received_at||received<cutoff||received>Date.now()||!anchor.labelIds.includes('INBOX')||anchor.labelIds.some((x:string)=>x==='SENT'||x==='DRAFT'))throw Error('MESSAGE_EVIDENCE_NOT_FORWARD_INCOMING');
  const result=await extractMessageEvidence(service,account,messageId,provider,maxPdfPages,anchor,[anchor],anchor.received_at,options);
- return {...result,capability:'mail.message_evidence.read',evidence_scope:'message',provider_received_at:anchor.received_at,not_before:notBefore,completeness:{...result.completeness,thread_complete:false,reply_context_complete:false}};
+ return {...result,capability:'mail.message_evidence.read',evidence_scope:'message',provider_received_at:anchor.received_at,not_before:notBefore,...(options.pdfFilename===undefined?{}:{selected_pdf_filename:options.pdfFilename}),completeness:{...result.completeness,thread_complete:false,reply_context_complete:false}};
 }
