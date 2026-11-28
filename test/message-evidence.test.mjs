@@ -19,6 +19,37 @@ test('incoming single-message extraction proves original pages without old threa
  enabled();const f=fixture();const r=await readMessageEvidence(f.service,account,'m1','gmail',cutoff);
  assert.equal(r.status,'complete');assert.equal(r.capability,'mail.message_evidence.read');assert.equal(r.evidence_scope,'message');assert.equal(r.provider_received_at,received);assert.equal(r.not_before,cutoff);assert.equal(r.messages.length,1);assert.equal(r.pdfs[0].page_count,2);assert.match(r.pdfs[0].pages[1].text,/Source page two/);assert.equal(r.pdfs[0].source.provider_received_at,received);assert.equal(r.completeness.thread_complete,false);assert.equal(r.completeness.reply_context_complete,false);assert.deepEqual(f.counts(),{emails:1,threads:0,downloads:1});
 });
+test('selected invoice extraction preserves all attachment metadata and downloads only the selected PDF', async () => {
+ enabled();
+ const f = fixture();
+ const other = { ...f.message.attachments[0], filename: 'other.pdf', attachment_id: 'a2' };
+ f.message.attachments.unshift(other);
+ const download = f.service.getDocumentAttachment;
+ f.service.getDocumentAttachment = async input => {
+  assert.equal(input.attachment.filename, 'invoice.pdf');
+  return download(input);
+ };
+ const result = await readMessageEvidence(f.service, account, 'm1', 'gmail', cutoff, 50, {pdfFilename:'invoice.pdf'});
+ assert.equal(result.status, 'complete');
+ assert.equal(result.selected_pdf_filename, 'invoice.pdf');
+ assert.equal(result.attachment_count, 2);
+ assert.deepEqual(result.attachments.map(attachment => attachment.filename), ['other.pdf', 'invoice.pdf']);
+ assert.deepEqual(result.pdfs.map(pdf => pdf.filename), ['invoice.pdf']);
+ assert.deepEqual(f.counts(), {emails:1, threads:0, downloads:1});
+});
+test('absent, duplicate, and wrong-type selections cannot download attachments', async () => {
+ enabled();
+ for (const change of [
+  attachments => attachments.splice(0),
+  attachments => attachments.push({...attachments[0], attachment_id:'a2'}),
+  attachments => {attachments[0].mime_type = 'text/plain';},
+ ]) {
+  const f = fixture();
+  change(f.message.attachments);
+  await assert.rejects(readMessageEvidence(f.service, account, 'm1', 'gmail', cutoff, 50, {pdfFilename:'invoice.pdf'}), /PDF_SELECTION_INVALID/);
+  assert.equal(f.counts().downloads, 0);
+ }
+});
 test('new operation requires literal activation before any source read',async()=>{delete process.env.ACCOUNTING_MESSAGE_EVIDENCE_ENABLED;const f=fixture();await assert.rejects(()=>readMessageEvidence(f.service,account,'m1','gmail',cutoff),/NOT_ACTIVATED/);assert.deepEqual(f.counts(),{emails:0,threads:0,downloads:0});});
 test('old, missing or forged receipt, future receipt and nonincoming labels deny before attachment access',async()=>{
  enabled();for(const mutate of[m=>m.received_at='2026-11-19T12:00:00.000Z',m=>delete m.received_at,m=>m.received_at='not-a-date',m=>m.received_at='2099-01-01T00:00:00.000Z',m=>m.labelIds=['SENT','INBOX'],m=>m.labelIds=['DRAFT','INBOX'],m=>m.labelIds=['ARCHIVE'],m=>{m.received_at=null;m.date=received}]){const f=fixture();mutate(f.message);await assert.rejects(()=>readMessageEvidence(f.service,account,'m1','gmail',cutoff),/NOT_FORWARD_INCOMING/);assert.deepEqual(f.counts(),{emails:1,threads:0,downloads:0});}
